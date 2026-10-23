@@ -1,0 +1,16 @@
+{{ define "main" }}
+<article>
+  <header class="post-header">
+    <h1>{{ .Title }}</h1>
+    <p class="meta">
+      <time datetime="{{ .Date.Format "2006-01-02" }}">{{ .Date.Format "Jan 2, 2006" }}</time>
+      {{ with .Lastmod }}{{ if ne (.Format "2006-01-02") ($.Date.Format "2006-01-02") }} · updated {{ .Format "Jan 2, 2006" }}{{ end }}{{ end }}
+      {{ range .GetTerms "tags" }} · <a class="tag" href="{{ .RelPermalink }}">#{{ .LinkTitle }}</a>{{ end }}
+    </p>
+    {{ with .Description }}<p class="lede">{{ . }}</p>{{ end }}
+  </header>
+  {{ if .Params.toc }}<nav class="toc" aria-label="Contents"><strong>Contents</strong>{{ .TableOfContents }}</nav>{{ end }}
+  {{ .Content }}
+  {{ with .Parent }}{{ if not .IsHome }}<p class="back"><a href="{{ .RelPermalink }}">← {{ .Title }}</a></p>{{ end }}{{ end }}
+</article>
+{{ end }}

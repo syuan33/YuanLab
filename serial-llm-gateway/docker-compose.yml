@@ -1,0 +1,48 @@
+services:
+  gateway:
+    build: .
+    image: serial-llm-gateway:latest
+    container_name: serial-llm-gateway
+    restart: unless-stopped
+    ports:
+      # Set GATEWAY_BIND to your Mac's LAN IP (or 127.0.0.1) to avoid listening on every interface.
+      - "${GATEWAY_BIND:-0.0.0.0}:8001:8001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      UPSTREAM_URL: ${UPSTREAM_URL:-http://host.docker.internal:8000}
+      MAX_QUEUE_SIZE: ${MAX_QUEUE_SIZE:-8}
+      QUEUE_TIMEOUT_SECONDS: ${QUEUE_TIMEOUT_SECONDS:-600}
+      UPSTREAM_TIMEOUT_SECONDS: ${UPSTREAM_TIMEOUT_SECONDS:-1200}
+      UPSTREAM_CONNECT_TIMEOUT_SECONDS: ${UPSTREAM_CONNECT_TIMEOUT_SECONDS:-10}
+      MAX_REQUEST_BYTES: ${MAX_REQUEST_BYTES:-1048576}
+      STOP_POLICY: ${STOP_POLICY:-drain}
+      RECOVERY_COOLDOWN_SECONDS: ${RECOVERY_COOLDOWN_SECONDS:-10}
+      RECOVERY_ATTEMPTS: ${RECOVERY_ATTEMPTS:-3}
+      AUTO_RECOVER: ${AUTO_RECOVER:-true}
+      PRIORITY_AGING_SECONDS: ${PRIORITY_AGING_SECONDS:-300}
+      RESERVED_PRIORITY_SLOTS: ${RESERVED_PRIORITY_SLOTS:-2}
+      RETRY_AFTER_SECONDS: ${RETRY_AFTER_SECONDS:-30}
+      SHUTDOWN_GRACE_SECONDS: ${SHUTDOWN_GRACE_SECONDS:-15}
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
+      TRUSTED_API_KEYS: ${TRUSTED_API_KEYS:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    mem_limit: 256m
+    cpus: 1.0
+    pids_limit: 128
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 40s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      start_period: 5s
+      retries: 3

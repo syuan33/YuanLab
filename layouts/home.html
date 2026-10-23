@@ -1,0 +1,7 @@
+{{ define "main" }}
+<section class="intro">{{ .Content }}</section>
+{{ with site.GetPage "/toolkit" }}
+<h2>{{ .Title }}</h2>
+{{ partial "page-list.html" .Pages }}
+{{ end }}
+{{ end }}
