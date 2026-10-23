@@ -1,0 +1,14 @@
+<div class="shuli-calc" data-src="{{ "shuli.json" | relURL }}">
+  <style>
+    .shuli-calc input { font-size: 1.1rem; padding: .3rem .5rem; width: 10rem; }
+    .shuli-calc .shuli-tag { font-size: .8rem; padding: .1rem .5rem; border-radius: .6rem; color: #fff; }
+    .shuli-calc .shuli-吉 { background: #2e7d32; }
+    .shuli-calc .shuli-凶 { background: #c62828; }
+    .shuli-calc .shuli-半吉 { background: #ef6c00; }
+  </style>
+  <form>
+    <label>数字 <input type="text" inputmode="numeric" autocomplete="off" placeholder="例如 81"></label>
+  </form>
+  <div class="shuli-result" aria-live="polite"></div>
+</div>
+<script src="{{ "js/shuli-calculator.js" | relURL }}" charset="utf-8" defer></script>
