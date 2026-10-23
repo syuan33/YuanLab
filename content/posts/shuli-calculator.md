@@ -1,12 +1,11 @@
 ---
-title: "81数理速查计算器"
+title: "数字吉凶"
 date: 2026-10-23
 draft: false
 ---
 
-81数理（实为 80 数理，超过 80 则循环）源自姓名学，每个数字对应一种吉凶含义。
-输入任意正整数，自动按 `(n - 1) % 80 + 1` 取余并显示对应数理。
+厌倦了加载慢、广告多的在线数理计算器，这里放一个干净的给懂数理的人：无广告、无追踪，纯静态页面。
+
+数理数据库已开源，欢迎自取，也可以让你的智能体直接读取：[`shuli.py`](/shuli.py) 或 [`shuli.json`](/shuli.json)。
 
 {{< shuli-calculator >}}
-
-数据来自 `scripts/shuli.py`，通过 `scripts/export_shuli.py` 导出为 `shuli.json`。

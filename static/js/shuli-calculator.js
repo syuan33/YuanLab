@@ -12,9 +12,10 @@
   function parse(text) {
     var s = String(text).trim();
     if (!/^\d+$/.test(s)) throw new Error("输入的数字必须是正整数！");
-    var n = Number(s);
-    if (!Number.isSafeInteger(n)) throw new Error("数字过大");
-    return n;
+    if (/^0+$/.test(s)) throw new Error("输入的数字必须是正整数！");
+    // 10000 是 80 的倍数，所以只看末四位，结果与完整数字相同
+    var n = Number(s.slice(-4));
+    return n === 0 ? 10000 : n;
   }
 
   var FIELDS = [
@@ -37,7 +38,7 @@
     out.appendChild(head);
     if (input !== entry.number) {
       var note = document.createElement("p");
-      note.textContent = input + " 取 80 余数后对应 " + entry.number;
+      note.textContent = input + " 除以 80 取余后对应 " + entry.number;
       out.appendChild(note);
     }
     FIELDS.forEach(function (f) {
@@ -65,7 +66,6 @@
       }
     }
 
-    input.addEventListener("input", update);
     el.querySelector("form").addEventListener("submit", function (e) {
       e.preventDefault();
       update();
