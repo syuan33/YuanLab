@@ -261,6 +261,16 @@ async def test_queue_overflow_returns_503_with_retry_after(upstream, make_gatewa
     assert (await status(client))["total_rejected"] == 1
 
 
+@pytest.mark.parametrize("reserved, served", [(2, 7), (0, 9)])
+async def test_burst_of_eleven_routine_requests(upstream, make_gateway, client_for, reserved, served):
+    # MAX_QUEUE_SIZE=8 counts waiting requests only. With the default of 2 reserved places routine jobs
+    # may fill 6 of them: 1 running + 6 waiting = 7 served, 4 rejected. With none reserved: 9 and 2.
+    client = client_for(make_gateway(max_queue_size=8, reserved_priority_slots=reserved))
+    results = await asyncio.gather(*[post(client, req(f"b{i}", delay=0.3)) for i in range(11)])
+    assert sorted(r.status_code for r in results) == [200] * served + [503] * (11 - served)
+    assert len(upstream.started) == served
+
+
 async def test_queue_timeout(upstream, make_gateway, client_for):
     gateway = make_gateway(queue_timeout_seconds=0.3)
     client = client_for(gateway)

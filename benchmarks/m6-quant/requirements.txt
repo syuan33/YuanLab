@@ -1,0 +1,6 @@
+# Runtime (on the M6): only httpx. The rest is the standard library.
+httpx==0.28.1
+# Tests only
+pytest==9.1.1
+fastapi==0.161.0
+uvicorn==0.54.0
