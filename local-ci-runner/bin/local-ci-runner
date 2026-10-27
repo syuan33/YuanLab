@@ -1,0 +1,4 @@
+#!/bin/sh
+# Thin launcher: runs the package from this checkout with the system python3 (stdlib only).
+here=$(cd "$(dirname "$0")/.." && pwd)
+exec python3 -s -c 'import sys; sys.path.insert(0, sys.argv[1] + "/src"); from local_ci_runner.cli import main; sys.exit(main(sys.argv[2:]))' "$here" "$@"

@@ -1,0 +1,107 @@
+# EXAMPLE ONLY - synthetic names (example-org/example-repo, SUBMODULE_A, SECRET_A). Adapt it in your own repository
+# through your own review process; nothing in this tool applies it for you.
+#
+# Exactly ONE job and ONE check context (`verify`). There is deliberately no job-level `if:` and no second job with the
+# same name: fork / wrong-repo / wrong-event runs are refused by the runner's job-started hook (configured in the runner,
+# not here), which FAILS the job instead of skipping it, so a skipped check can never be mistaken for a pass.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify
+    runs-on: [self-hosted, macOS, ARM64, local-ci-runner]
+    timeout-minutes: 45
+    steps:
+      # Fails the job unless the dedicated-user precondition, tools, pinned runner and managed launcher are in place.
+      - name: Local CI readiness
+        run: local-ci-runner doctor
+
+      # On pull_request this checks out GitHub's PR integration (merge) commit, i.e. $GITHUB_SHA.
+      - name: Checkout (without submodules)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: Assert exact integration commit
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$GITHUB_SHA" ]; then
+            echo "::error::checked-out HEAD ${actual} != GITHUB_SHA ${GITHUB_SHA}"
+            exit 1
+          fi
+          echo "verifying ${GITHUB_EVENT_NAME} integration commit ${GITHUB_SHA}"
+
+      # OPTIONAL example for one private submodule with a read-only deploy key held in an Actions secret.
+      # Everything lives in a per-step directory under $RUNNER_TEMP that is removed on every exit path.
+      - name: Check out private submodule (example)
+        env:
+          KEY_A: ${{ secrets.SECRET_A }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEY_A}" ]; then
+            echo "::error::Missing Actions secret SECRET_A"
+            exit 1
+          fi
+          umask 077
+          d="$RUNNER_TEMP/submodule-ssh"
+          install -d -m 700 "$d"
+          trap 'rm -rf "$d"' EXIT
+          printf '%s\n' "$KEY_A" > "$d/submodule_a_deploy_key"
+          # Fail-closed host verification against GitHub's published Ed25519 fingerprint
+          # (https://docs.github.com/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints).
+          expected_fp="SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
+          ssh-keyscan -t ed25519 github.com > "$d/github_host.pub" 2>/dev/null
+          actual_fp="$(ssh-keygen -lf "$d/github_host.pub" -E sha256 | awk '{print $2}')"
+          if [ "$(wc -l < "$d/github_host.pub" | tr -d ' ')" -ne 1 ] || [ "$actual_fp" != "$expected_fp" ]; then
+            echo "::error::github.com Ed25519 host key fingerprint mismatch (got '${actual_fp}')"
+            exit 1
+          fi
+          install -m 600 "$d/github_host.pub" "$d/known_hosts"
+          cat > "$d/ssh_config" <<SSHCFG
+          Host github-submodule-a
+            HostName github.com
+            User git
+            IdentityFile $d/submodule_a_deploy_key
+            IdentitiesOnly yes
+            HostKeyAlgorithms ssh-ed25519
+            StrictHostKeyChecking yes
+            UserKnownHostsFile $d/known_hosts
+            GlobalKnownHostsFile /dev/null
+          SSHCFG
+          export GIT_SSH_COMMAND="ssh -F $d/ssh_config"
+          export GIT_CONFIG_GLOBAL="$d/gitconfig"
+          export GIT_CONFIG_NOSYSTEM=1
+          git config --global url."git@github-submodule-a:example-org/submodule-a.git".insteadOf "git@github.com:example-org/submodule-a.git"
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
+      # The repository's own entrypoint (the same one named in the protected local config).
+      - name: Verify
+        run: ci/verify.sh -o "$RUNNER_TEMP/verify-output"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: results
+          path: ${{ runner.temp }}/verify-output
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Local CI report
+        if: always()
+        run: local-ci-runner report --results-dir "$RUNNER_TEMP/verify-output" --job-status "${{ job.status }}"

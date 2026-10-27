@@ -1,0 +1,7 @@
+{
+  "version": "2.338.2",
+  "asset": "actions-runner-osx-arm64-2.338.2.tar.gz",
+  "url": "https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-osx-arm64-2.338.2.tar.gz",
+  "sha256": "25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388",
+  "verification": "asset downloaded from the official URL and hashed independently (tag v2.338.2 was the newest tag in actions/runner); CI job pin-check compares against official release metadata"
+}

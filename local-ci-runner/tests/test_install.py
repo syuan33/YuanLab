@@ -1,0 +1,274 @@
+import hashlib
+import io
+import json
+import plistlib
+import tarfile
+import os
+
+from local_ci_runner import launchd, safety
+from local_ci_runner.config import Paths
+from local_ci_runner.runner_install import InstallError, Installer, Pin, download_verified, safe_extract
+from tests.fixtures import TmpCase
+
+TOKEN = "AFAKEREGISTRATIONTOKEN0000000000"  # synthetic
+
+
+def make_tarball(path, members):
+    with tarfile.open(path, "w:gz") as t:
+        for name, data in members.items():
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            ti.mode = 0o755
+            t.addfile(ti, io.BytesIO(data))
+
+
+def snapshot(root):
+    return sorted(str(p) for p in root.rglob("*"))
+
+
+class Recorder:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, env=None, cwd=None):
+        self.calls.append((list(argv), dict(env or {}), cwd))
+        return 0
+
+
+class Base(TmpCase):
+    def setUp(self):
+        super().setUp()
+        self.paths = Paths(self.tmp / "home", launch_agents_dir=self.tmp / "LaunchAgents", bin_dir=self.tmp / "bin")
+        self.tar = self.tmp / "r.tar.gz"
+        make_tarball(self.tar, {"run.sh": b"#!/bin/sh\n", "config.sh": b"#!/bin/sh\n"})
+        self.sha = hashlib.sha256(self.tar.read_bytes()).hexdigest()
+        self.pin = Pin("9.9.9", "actions-runner-osx-arm64-9.9.9.tar.gz", "https://example.invalid/r.tar.gz", self.sha)
+        self.fetch = lambda url, dest: dest.write_bytes(self.tar.read_bytes())
+        self.rec = Recorder()
+
+    def inst(self, pin=None, euid=1000, gate=None):
+        return Installer(self.paths, pin or self.pin, self.rec, self.fetch, euid=euid, gate=gate)
+
+
+class Download(Base):
+    def test_checksum_match(self):
+        dest = self.tmp / "d.tgz"
+        download_verified(self.pin.url, dest, self.sha, self.fetch)
+        self.assertTrue(dest.exists())
+
+    def test_checksum_mismatch_deletes_and_raises(self):
+        dest = self.tmp / "d.tgz"
+        with self.assertRaises(InstallError):
+            download_verified(self.pin.url, dest, "0" * 64, self.fetch)
+        self.assertFalse(dest.exists())
+
+    def test_unpinned_refused(self):
+        for bad in (None, "", "TODO", "0" * 63):
+            with self.assertRaises(InstallError):
+                self.inst(Pin("1", "a", "u", bad)).apply_install()
+
+    def test_tar_traversal_and_links_refused(self):
+        bad = self.tmp / "bad.tgz"
+        make_tarball(bad, {"../evil": b"x"})
+        with self.assertRaises(InstallError):
+            safe_extract(bad, self.tmp / "out")
+        self.assertFalse((self.tmp / "evil").exists())
+        with tarfile.open(bad, "w:gz") as t:
+            ti = tarfile.TarInfo("l")
+            ti.type = tarfile.SYMTYPE
+            ti.linkname = "/etc/passwd"
+            t.addfile(ti)
+        with self.assertRaises(InstallError):
+            safe_extract(bad, self.tmp / "out2")
+
+
+class Plans(Base):
+    def test_dry_run_has_no_side_effects(self):
+        before = snapshot(self.tmp)
+        i = self.inst()
+        for plan in (i.plan_install(), i.plan_register("example-org/example-repo"), i.plan_uninstall()):
+            self.assertTrue(plan)
+        self.assertEqual(snapshot(self.tmp), before)
+        self.assertEqual(self.rec.calls, [])
+
+    def test_install_apply_writes_runner_and_plist_only(self):
+        self.inst().apply_install()
+        self.assertTrue((self.paths.runner_dir / "run.sh").exists())
+        self.assertTrue(self.paths.plist.exists())
+        self.assertEqual(self.rec.calls, [])  # install never starts the service
+        self.assertTrue(self.paths.launcher.exists())
+        self.assertTrue(safety.is_owned(self.paths.work_dir, self.paths.home))
+        env = (self.paths.runner_dir / ".env").read_text()
+        self.assertIn("ACTIONS_RUNNER_HOOK_JOB_STARTED=" + str(self.paths.hooks_dir / "job-started.sh"), env)
+        self.assertIn(str(self.paths.bin_dir), env)
+        pl = plistlib.loads(self.paths.plist.read_bytes())
+        self.assertNotIn("UserName", pl)  # LaunchAgent runs as the logged-in user
+        self.assertEqual(pl["Label"], launchd.LABEL)
+
+    def test_refuses_root_for_every_apply(self):
+        i = self.inst(euid=0)
+        for fn in (i.apply_install, lambda: i.apply_register("example-org/example-repo", TOKEN, True), i.apply_uninstall, i.apply_start, i.apply_stop):
+            with self.assertRaises(Exception):
+                fn()
+
+    def test_plist_is_user_launchagent(self):
+        pl = launchd.render_plist(self.paths)
+        self.assertTrue(pl["ProgramArguments"][0].endswith("run.sh"))
+        self.assertEqual(launchd.bootout_cmd(501), ["launchctl", "bootout", f"gui/501/{launchd.LABEL}"])
+
+
+class Register(Base):
+    def setUp(self):
+        super().setUp()
+        self.inst().apply_install()
+
+    def test_requires_confirmation_and_token(self):
+        i = self.inst()
+        with self.assertRaises(InstallError):
+            i.apply_register("example-org/example-repo", TOKEN, confirm_admin_approved=False)
+        with self.assertRaises(InstallError):
+            i.apply_register("example-org/example-repo", "", confirm_admin_approved=True)
+        with self.assertRaises(Exception):
+            i.apply_register("not a repo", TOKEN, confirm_admin_approved=True)
+        self.assertEqual(self.rec.calls, [])
+
+    def test_token_only_in_env_never_argv_or_plan(self):
+        i = self.inst()
+        i.apply_register("example-org/example-repo", TOKEN, confirm_admin_approved=True)
+        argv, env, _ = self.rec.calls[0]
+        self.assertNotIn(TOKEN, " ".join(argv))
+        self.assertEqual(env["ACTIONS_RUNNER_INPUT_TOKEN"], TOKEN)
+        self.assertIn("local-ci-runner", " ".join(argv))
+        self.assertNotIn(TOKEN, " ".join(i.plan_register("example-org/example-repo")))
+        self.assertNotIn(TOKEN, json.dumps(os.listdir(self.paths.home)))
+        self.assertNotIn(TOKEN, self.paths.config_file.read_text())
+
+    def test_registration_writes_protected_allowlist(self):
+        from local_ci_runner import allowlist
+        self.inst().apply_register("example-org/example-repo", TOKEN, confirm_admin_approved=True)
+        self.assertEqual(self.paths.config_file.stat().st_mode & 0o777, 0o600)
+        cfg = allowlist.load(self.paths)
+        self.assertEqual(cfg.allowed_repos, frozenset({"example-org/example-repo"}))
+
+    def test_dry_run_and_refusals_write_no_allowlist(self):
+        i = self.inst()
+        i.plan_register("example-org/example-repo")
+        with self.assertRaises(InstallError):
+            i.apply_register("example-org/example-repo", TOKEN, confirm_admin_approved=False)
+        self.assertFalse(self.paths.config_file.exists())
+
+    def test_existing_allowlist_is_never_overwritten(self):
+        self.paths.config_file.write_text("{}")
+        with self.assertRaises(InstallError):
+            self.inst().apply_register("example-org/example-repo", TOKEN, confirm_admin_approved=True)
+        self.assertEqual(self.paths.config_file.read_text(), "{}")
+        self.assertEqual(self.rec.calls, [])
+
+    def test_failed_config_sh_removes_the_allowlist_it_created(self):
+        class Fail(Recorder):
+            def __call__(self, argv, env=None, cwd=None):
+                super().__call__(argv, env, cwd)
+                return 1
+        i = Installer(self.paths, self.pin, Fail(), self.fetch, euid=1000)
+        with self.assertRaises(InstallError):
+            i.apply_register("example-org/example-repo", TOKEN, confirm_admin_approved=True)
+        self.assertFalse(self.paths.config_file.exists())
+
+
+class StartStopUninstall(Base):
+    def test_start_requires_registration(self):
+        i = self.inst()
+        i.apply_install()
+        with self.assertRaises(InstallError):
+            i.apply_start()
+        (self.paths.runner_dir / ".runner").write_text("{}")
+        i.apply_start()
+        self.assertEqual(self.rec.calls[-1][0][:2], ["launchctl", "bootstrap"])
+
+    def test_stop_only_boots_out_own_label(self):
+        i = self.inst()
+        i.apply_install()
+        i.apply_stop()
+        argv = self.rec.calls[-1][0]
+        self.assertEqual(argv[:2], ["launchctl", "bootout"])
+        self.assertTrue(argv[2].endswith("/" + launchd.LABEL))
+        self.assertNotIn("kill", " ".join(argv))
+
+    def test_uninstall_removes_only_owned(self):
+        i = self.inst()
+        i.apply_install()
+        other = self.paths.launch_agents / "com.someone.else.plist"
+        other.write_bytes(b"x")
+        stranger = self.paths.home / "keepme"
+        stranger.write_text("x")
+        i.apply_uninstall()
+        self.assertFalse(self.paths.plist.exists())
+        self.assertFalse(self.paths.runner_dir.exists())
+        self.assertTrue(other.exists() and stranger.exists())
+        self.assertFalse(self.paths.launcher.exists() or self.paths.app_dir.exists() or self.paths.work_dir.exists())
+        self.assertFalse(self.paths.config_file.exists())
+
+    def test_uninstall_leaves_modified_launcher(self):
+        i = self.inst()
+        i.apply_install()
+        self.paths.launcher.write_text("#!/bin/sh\necho mine\n")
+        notes = i.apply_uninstall()
+        self.assertTrue(self.paths.launcher.exists())
+        self.assertTrue(any("left" in n for n in notes))
+        self.assertFalse(self.paths.app_dir.exists())
+
+    def test_install_refuses_to_overwrite_foreign_launcher(self):
+        self.paths.bin_dir.mkdir()
+        self.paths.launcher.write_text("foreign")
+        with self.assertRaises(Exception):
+            self.inst().apply_install()
+        self.assertEqual(self.paths.launcher.read_text(), "foreign")
+
+    def test_uninstall_refuses_unmarked_work_or_app_dir(self):
+        i = self.inst()
+        i.apply_install()
+        (self.paths.work_dir / safety.MARKER).unlink()
+        with self.assertRaises(Exception):
+            i.apply_uninstall()
+        self.assertTrue(self.paths.runner_dir.exists() and self.paths.launcher.exists())
+
+    def test_uninstall_refuses_unmarked_runner_dir(self):
+        self.paths.runner_dir.mkdir(parents=True)
+        (self.paths.runner_dir / "mine").write_text("x")
+        with self.assertRaises(Exception):
+            self.inst().apply_uninstall()
+        self.assertTrue((self.paths.runner_dir / "mine").exists())
+
+
+class Gate(Base):
+    def setUp(self):
+        super().setUp()
+        self.inst().apply_install()
+        (self.paths.runner_dir / ".runner").write_text("{}")
+
+    def failing_gate(self):
+        raise InstallError("not ready - doctor failures: dedicated user")
+
+    def test_gate_blocks_register_and_start_without_side_effects(self):
+        (self.paths.runner_dir / ".runner").unlink()
+        i = self.inst(gate=self.failing_gate)
+        with self.assertRaises(InstallError):
+            i.apply_register("example-org/example-repo", TOKEN, True)
+        (self.paths.runner_dir / ".runner").write_text("{}")
+        with self.assertRaises(InstallError):
+            i.apply_start()
+        self.assertEqual(self.rec.calls, [])
+
+    def test_register_uses_managed_work_dir_and_path(self):
+        (self.paths.runner_dir / ".runner").unlink()
+        self.inst(gate=lambda: None).apply_register("example-org/example-repo", TOKEN, True)
+        argv, env, _ = self.rec.calls[0]
+        self.assertEqual(argv[argv.index("--work") + 1], str(self.paths.work_dir))
+        self.assertTrue(env["PATH"].startswith(str(self.paths.bin_dir)))
+
+    def test_shipped_pin_is_populated_and_official(self):
+        from pathlib import Path
+        pin = Pin.load(Path(__file__).resolve().parents[1] / "runner-pin.json")
+        self.assertTrue(pin.pinned)
+        self.assertEqual((pin.version, pin.sha256), ("2.338.2", "25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388"))
+        self.assertEqual(pin.url, "https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-osx-arm64-2.338.2.tar.gz")
