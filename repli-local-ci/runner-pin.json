@@ -1,0 +1,7 @@
+{
+  "_comment": "sha256 is intentionally null: it must be copied by a human reviewer from the official actions/runner release notes for this exact asset. install --apply refuses while it is null.",
+  "version": "2.328.0",
+  "asset": "actions-runner-osx-arm64-2.328.0.tar.gz",
+  "url": "https://github.com/actions/runner/releases/download/v2.328.0/actions-runner-osx-arm64-2.328.0.tar.gz",
+  "sha256": null
+}

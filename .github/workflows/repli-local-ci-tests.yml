@@ -1,0 +1,22 @@
+name: repli-local-ci tests
+
+on:
+  pull_request:
+    paths: ["repli-local-ci/**", ".github/workflows/repli-local-ci-tests.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: repli-local-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests (synthetic fixtures only; no network, no runner, no REPLI)
+        run: PYTHONPATH=src:. python3 -W error::ResourceWarning -m unittest discover -s tests -t . -v
+      - name: Smoke test (synthetic)
+        run: ./scripts/smoke-local.sh
