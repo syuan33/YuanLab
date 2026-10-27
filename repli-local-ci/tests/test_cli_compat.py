@@ -19,19 +19,25 @@ class CLI(TmpCase):
         return rc, out.getvalue(), err.getvalue()
 
     def test_dry_runs_default_and_no_side_effects(self):
-        for cmd in (["install"], ["install", "--dry-run"], ["register"], ["register", "--dry-run"], ["uninstall"], ["uninstall", "--dry-run"]):
+        for cmd in (["install"], ["install", "--dry-run"], ["register"], ["register", "--dry-run"], ["uninstall"], ["uninstall", "--dry-run"], ["start", "--dry-run"], ["stop", "--dry-run"], ["attest-dedicated-user"], ["clean"]):
             rc, out, _ = self.run_cli(*cmd)
             self.assertEqual(rc, 0, cmd)
             self.assertIn("DRY RUN", out)
         self.assertFalse((self.tmp / "home").exists())
         self.assertFalse((self.tmp / "Library").exists())
+        self.assertFalse((self.tmp / ".local").exists())
 
     def test_apply_and_dry_run_conflict(self):
         rc, _, _ = self.run_cli("install", "--dry-run", "--apply")
         self.assertNotEqual(rc, 0)
 
     def test_install_apply_refuses_unpinned_runner(self):
-        rc, _, err = self.run_cli("install", "--apply")
+        import json
+        unpinned = self.tmp / "pin.json"
+        unpinned.write_text(json.dumps({"version": "1.0.0", "asset": "a.tgz", "sha256": None,
+                                        "url": "https://github.com/actions/runner/releases/download/v1.0.0/a.tgz"}))
+        with mock.patch.object(cli, "PIN_FILE", unpinned):
+            rc, _, err = self.run_cli("install", "--apply")
         self.assertNotEqual(rc, 0)
         self.assertFalse((self.tmp / "Library").exists())
 
@@ -46,15 +52,16 @@ class CLI(TmpCase):
 
     def test_doctor_and_status_run_readonly(self):
         rc, out, _ = self.run_cli("doctor")
-        self.assertIn(rc, (0, 1))
-        self.assertIn("root", out)
+        self.assertEqual(rc, 1)  # this test host is not a provisioned dedicated macOS arm64 account
+        self.assertIn("not root", out)
+        self.assertIn("NOT READY", out)
         rc, out, _ = self.run_cli("status")
         self.assertEqual(rc, 0)
         self.assertFalse((self.tmp / "home").exists())
 
     def test_all_subcommands_exist(self):
         _, out, _ = self.run_cli("--help")
-        for c in "doctor install register start status run stop uninstall cancel".split():
+        for c in "doctor install register start status run stop uninstall cancel attest-dedicated-user hook report clean verify-pin".split():
             self.assertIn(c, out)
 
 

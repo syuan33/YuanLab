@@ -1,0 +1,161 @@
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -13,21 +13,40 @@
+   cancel-in-progress: true
+ 
+ jobs:
++  # Same-repository runs only. The local runner additionally refuses anything else in its job-started hook
++  # (runner configuration, not editable from this file).
+   verify:
+     name: verify
+-    runs-on: ubuntu-24.04
++    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
++    runs-on: [self-hosted, macOS, ARM64, repli-local-ci]
+     timeout-minutes: 45
+     steps:
++      # Fails the job unless the dedicated-user precondition, tools, pinned runner and managed launcher are all in place.
++      - name: Local CI readiness
++        run: repli-local-ci doctor
++
+       - name: Checkout (without submodules)
+         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+         with:
+           submodules: false
+           persist-credentials: false
+ 
+-      # The two private submodules use separate read-only deploy keys. Each key
+-      # gets its own SSH host alias; git rewrites the .gitmodules URLs on the fly
+-      # (global config only, .gitmodules is untouched). Secrets reach this step
+-      # only through env and are never echoed or written into the workspace.
++      # actions/checkout on pull_request checks out GitHub's PR integration (merge) commit == $GITHUB_SHA.
++      # Assert that, so the job can never silently verify head-only content.
++      - name: Assert exact integration commit
++        run: |
++          set -euo pipefail
++          actual="$(git rev-parse HEAD)"
++          if [ "$actual" != "$GITHUB_SHA" ]; then
++            echo "::error::checked-out HEAD ${actual} != GITHUB_SHA ${GITHUB_SHA}"
++            exit 1
++          fi
++          echo "verifying ${GITHUB_EVENT_NAME} integration commit ${GITHUB_SHA}"
++
++      # The two private submodules use separate read-only deploy keys. Each key gets its own SSH host
++      # alias. Unlike the hosted-VM version, nothing is written to ~/.ssh or the global git config of the
++      # runner account: keys, ssh config, known_hosts and git config live in a per-step directory under
++      # $RUNNER_TEMP that is removed on every exit path (and again by the runner's job-completed hook).
+       - name: Check out private submodules
+         env:
+           FASTAPI_KEY: ${{ secrets.FASTAPI_SUBMODULE_SSH_KEY }}
+@@ -40,43 +59,50 @@
+               exit 1
+             fi
+           done
+-          install -d -m 700 ~/.ssh
+           umask 077
+-          printf '%s\n' "$FASTAPI_KEY" > ~/.ssh/fastapi_deploy_key
+-          printf '%s\n' "$RN_APP_API_KEY" > ~/.ssh/rn_app_api_deploy_key
+-          # Fail-closed host verification: only github.com's Ed25519 key is
+-          # accepted, and only if it matches GitHub's published fingerprint
++          d="$RUNNER_TEMP/submodule-ssh"
++          install -d -m 700 "$d"
++          trap 'rm -rf "$d"' EXIT
++          printf '%s\n' "$FASTAPI_KEY" > "$d/fastapi_deploy_key"
++          printf '%s\n' "$RN_APP_API_KEY" > "$d/rn_app_api_deploy_key"
++          # Fail-closed host verification: only github.com's Ed25519 key is accepted, and only if it
++          # matches GitHub's published fingerprint
+           # (https://docs.github.com/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints).
+           expected_fp="SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
+-          ssh-keyscan -t ed25519 github.com > "$RUNNER_TEMP/github_host.pub" 2>/dev/null
+-          actual_fp="$(ssh-keygen -lf "$RUNNER_TEMP/github_host.pub" -E sha256 | awk '{print $2}')"
+-          if [ "$(wc -l < "$RUNNER_TEMP/github_host.pub")" -ne 1 ] || [ "$actual_fp" != "$expected_fp" ]; then
++          ssh-keyscan -t ed25519 github.com > "$d/github_host.pub" 2>/dev/null
++          actual_fp="$(ssh-keygen -lf "$d/github_host.pub" -E sha256 | awk '{print $2}')"
++          if [ "$(wc -l < "$d/github_host.pub" | tr -d ' ')" -ne 1 ] || [ "$actual_fp" != "$expected_fp" ]; then
+             echo "::error::github.com Ed25519 host key fingerprint mismatch (got '${actual_fp}', expected ${expected_fp})"
+             exit 1
+           fi
+-          install -m 600 "$RUNNER_TEMP/github_host.pub" ~/.ssh/known_hosts
+-          cat > ~/.ssh/config <<'SSHCFG'
++          install -m 600 "$d/github_host.pub" "$d/known_hosts"
++          cat > "$d/ssh_config" <<SSHCFG
+           Host github-fastapi
+             HostName github.com
+             User git
+-            IdentityFile ~/.ssh/fastapi_deploy_key
++            IdentityFile $d/fastapi_deploy_key
+             IdentitiesOnly yes
+             HostKeyAlgorithms ssh-ed25519
+             StrictHostKeyChecking yes
++            UserKnownHostsFile $d/known_hosts
++            GlobalKnownHostsFile /dev/null
+           Host github-rn-app-api
+             HostName github.com
+             User git
+-            IdentityFile ~/.ssh/rn_app_api_deploy_key
++            IdentityFile $d/rn_app_api_deploy_key
+             IdentitiesOnly yes
+             HostKeyAlgorithms ssh-ed25519
+             StrictHostKeyChecking yes
++            UserKnownHostsFile $d/known_hosts
++            GlobalKnownHostsFile /dev/null
+           SSHCFG
++          export GIT_SSH_COMMAND="ssh -F $d/ssh_config"
++          export GIT_CONFIG_GLOBAL="$d/gitconfig"
++          export GIT_CONFIG_NOSYSTEM=1
+           git config --global url."git@github-fastapi:syuan33/repli-fastapi-deployment.git".insteadOf "git@github.com:syuan33/repli-fastapi-deployment.git"
+           git config --global url."git@github-rn-app-api:syuan33/repli-rn-app-api.git".insteadOf "git@github.com:syuan33/repli-rn-app-api.git"
+           git submodule sync --recursive
+           git submodule update --init --recursive
+-          # Keys are only needed for the checkout above.
+-          rm -f ~/.ssh/fastapi_deploy_key ~/.ssh/rn_app_api_deploy_key
+ 
+       - name: Set up Node
+         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+@@ -98,17 +124,18 @@
+           cache: pip
+           cache-dependency-path: fastapi_deployment/requirements.txt
+ 
+-      # Immutable release asset (tag v2026.01.19 = commit
+-      # ae39277f7fb8d5af3cd60a770094bde90355a74d), verified by fixed SHA-256
+-      # before it is unpacked or executed.
++      # Immutable release asset (tag v2026.01.19 = commit ae39277f7fb8d5af3cd60a770094bde90355a74d), verified by
++      # fixed SHA-256 before it is unpacked or executed. The macOS arm64 hash below was computed once by
++      # downloading the official asset over TLS; a reviewer MUST cross-check it (the linux hash in the hosted
++      # workflow is the maintainers' own).
+       - name: Install clj-kondo
+         run: |
+           set -euo pipefail
+           version=2026.01.19
+-          expected_sha=99e3e9eaa977887ecb6df1452b5d8ffa86ef869d8452ed7c222228084c44c1a7
++          expected_sha=911f3803be075d59172cb92f0d39aea077fc7550dcdc4e8c946d61552fa51a12
+           zip="$RUNNER_TEMP/clj-kondo.zip"
+-          curl -sSfL -o "$zip" "https://github.com/clj-kondo/clj-kondo/releases/download/v${version}/clj-kondo-${version}-linux-static-amd64.zip"
+-          echo "${expected_sha}  ${zip}" | sha256sum -c -
++          curl -sSfL -o "$zip" "https://github.com/clj-kondo/clj-kondo/releases/download/v${version}/clj-kondo-${version}-macos-aarch64.zip"
++          echo "${expected_sha}  ${zip}" | shasum -a 256 -c -
+           mkdir -p "$RUNNER_TEMP/bin"
+           unzip -qo "$zip" -d "$RUNNER_TEMP/bin"
+           chmod +x "$RUNNER_TEMP/bin/clj-kondo"
+@@ -142,3 +169,22 @@
+             ${{ runner.temp }}/verify-results
+           if-no-files-found: ignore
+           retention-days: 14
++
++      # Local, non-authoritative report (integration/head/base SHA, result hashes). See README.
++      - name: Local CI report
++        if: always()
++        run: repli-local-ci report --results-dir "$RUNNER_TEMP/verify-results" --job-status "${{ job.status }}"
++
++  # Fork PRs must not run on the Mac. A skipped job would satisfy a required check, so this hosted job
++  # carries the same check name `verify` and FAILS for forks (matching the hosted behaviour today, where forks
++  # fail for lack of secrets). Needs a disposable-repo test of branch-protection semantics before adoption.
++  verify-fork-refusal:
++    name: verify
++    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
++    runs-on: ubuntu-24.04
++    timeout-minutes: 2
++    permissions: {}
++    steps:
++      - run: |
++          echo "::error::Fork pull requests are not verified on the local runner"
++          exit 1

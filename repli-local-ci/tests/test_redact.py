@@ -1,11 +1,11 @@
-import unittest
+from tests.fixtures import StrictCase
 
 from repli_local_ci.redact import Redactor
 
 FAKE = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"  # synthetic, not a real token
 
 
-class RedactTests(unittest.TestCase):
+class RedactTests(StrictCase):
     def test_github_tokens(self):
         r = Redactor()
         for tok in [FAKE, "github_pat_" + "A" * 40, "ghs_" + "b" * 36, "gho_" + "c" * 36]:

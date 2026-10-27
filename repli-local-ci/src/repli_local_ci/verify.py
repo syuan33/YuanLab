@@ -67,23 +67,28 @@ def run_verify(src: Path, results: Path, log_path: Path, timeout: float, should_
     t = threading.Thread(target=pump, daemon=True)
     t.start()
     status = None
-    while proc.poll() is None:
-        if time.time() - started > timeout:
-            status = "timeout"
-        elif should_cancel():
-            status = "cancelled"
-        if status:
-            _killpg(pgid, proc)
-            break
-        time.sleep(0.1)
-    t.join(5)
     try:
-        os.killpg(pgid, signal.SIGKILL)  # stragglers from our own group
-    except ProcessLookupError:
-        pass
-    t.join(5)
-    proc.stdout.close()
-    logf.close()
+        while proc.poll() is None:
+            if time.time() - started > timeout:
+                status = "timeout"
+            elif should_cancel():
+                status = "cancelled"
+            if status:
+                _killpg(pgid, proc)
+                break
+            time.sleep(0.1)
+    finally:
+        # Every exit path (including exceptions in should_cancel) kills our own group and reaps the child.
+        if proc.poll() is None:
+            _killpg(pgid, proc)
+        try:
+            os.killpg(pgid, signal.SIGKILL)  # stragglers from our own group
+        except ProcessLookupError:
+            pass
+        proc.wait()
+        t.join(5)
+        proc.stdout.close()
+        logf.close()
     rc = proc.returncode
     if status is None:
         status = "passed" if rc == 0 else "failed"

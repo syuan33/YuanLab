@@ -5,7 +5,7 @@ set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-REPLI_LOCAL_CI_SMOKE_TMP="$tmp" REPLI_LOCAL_CI_HERE="$here" python3 -s - <<'PY'
+REPLI_LOCAL_CI_SMOKE_TMP="$tmp" REPLI_LOCAL_CI_HERE="$here" "${PYTHON:-python3}" -s - <<'PY'
 import os, sys
 sys.path[:0] = [os.environ["REPLI_LOCAL_CI_HERE"] + "/src", os.environ["REPLI_LOCAL_CI_HERE"]]
 from pathlib import Path

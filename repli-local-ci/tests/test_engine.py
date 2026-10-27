@@ -143,7 +143,7 @@ class Lifecycle(EngineBase):
 
     def test_cancel_kills_only_own_group(self):
         bystander = subprocess.Popen(["sleep", "60"], start_new_session=True)
-        self.addCleanup(bystander.kill)
+        self.addCleanup(lambda: (bystander.kill(), bystander.wait()))
         r = Remote(self.tmp, "sleep 120")
         ev = threading.Event()
         threading.Timer(0.8, ev.set).start()
@@ -174,3 +174,25 @@ class Lifecycle(EngineBase):
         e.queue.claim(j0["id"], pid=os.getpid())
         rep = e.run(SYNTH_REPO, resolve_ref(r.url, "main"), wait_seconds=0)
         self.assertEqual(rep["status"], "busy")
+
+
+class Reaping(EngineBase):
+    def test_exception_in_cancel_check_still_kills_and_reaps(self):
+        from repli_local_ci import verify
+        r = Remote(self.tmp, f'echo $$ > {self.tmp}/pid; sleep 60')
+        src = self.tmp / "src"
+        src.mkdir()
+        from repli_local_ci import gitops
+        gitops.fetch_exact(src, r.url, resolve_ref(r.url, "main"))
+        calls = {"n": 0}
+
+        def boom():
+            calls["n"] += 1
+            if (self.tmp / "pid").exists():
+                raise RuntimeError("boom")
+            return False
+        with self.assertRaises(RuntimeError):
+            verify.run_verify(src, self.tmp / "res", self.tmp / "log", 60, boom, self.tmp)
+        pid = int((self.tmp / "pid").read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)

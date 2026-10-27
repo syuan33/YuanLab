@@ -5,6 +5,10 @@ from .config import Paths
 LABEL = "local.repli-local-ci.runner"
 
 
+def runner_path(paths: Paths) -> str:
+    return f"{paths.bin_dir}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
 def render_plist(paths: Paths) -> dict:
     """A per-user LaunchAgent (runs as the logged-in user; there is deliberately no UserName key and no LaunchDaemon)."""
     return {
@@ -17,7 +21,7 @@ def render_plist(paths: Paths) -> dict:
         "ProcessType": "Background",
         "StandardOutPath": str(paths.logs / "runner.out.log"),
         "StandardErrorPath": str(paths.logs / "runner.err.log"),
-        "EnvironmentVariables": {"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"},
+        "EnvironmentVariables": {"PATH": runner_path(paths)},
     }
 
 

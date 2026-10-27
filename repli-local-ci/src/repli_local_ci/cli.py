@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
-from . import compat, gitops, launchd, safety
-from .config import ALLOWED_REPOS, DEFAULT_TIMEOUT, Paths
+from . import gitops, hooks, launchd, pincheck, readiness, report, safety
+from .config import ALLOWED_REPOS, CACHE_PATHS, DEFAULT_TIMEOUT, Paths
 from .engine import Engine
 from .queue import JobQueue
 from .runner_install import InstallError, Installer, Pin
@@ -32,7 +34,7 @@ def _add_mode(sp, default_note="default"):
 
 
 def _installer(paths):
-    return Installer(paths, Pin.load(PIN_FILE))
+    return Installer(paths, Pin.load(PIN_FILE), gate=_gate(paths))
 
 
 def _plan(title, lines):
@@ -42,39 +44,75 @@ def _plan(title, lines):
 
 
 def cmd_doctor(a, paths):
-    bad = 0
+    checks = readiness.run_checks(readiness.Ctx.real(), paths, PIN_FILE, Path(a.workflow) if a.workflow else None)
+    print(readiness.render(checks))
+    return readiness.exit_code(checks)
 
-    def row(ok, name, detail, hard=True):
-        nonlocal bad
-        tag = "ok  " if ok else ("FAIL" if hard else "warn")
-        bad += (not ok and hard)
-        print(f"[{tag}] {name}: {detail}")
 
-    row(os.geteuid() != 0, "not root", f"euid={os.geteuid()}")
-    mac = platform.system() == "Darwin" and platform.machine() == "arm64"
-    row(mac, "platform", f"{platform.system()}/{platform.machine()} (supported: Darwin/arm64)", hard=False)
-    row(sys.version_info >= (3, 9), "python>=3.9", sys.version.split()[0])
-    try:
-        pin = Pin.load(PIN_FILE)
-        row(pin.pinned, "runner pin", f"v{pin.version} sha256={'set' if pin.pinned else 'NOT PINNED (install --apply will refuse)'}", hard=False)
-    except Exception as e:
-        row(False, "runner pin", str(e))
-    if paths.known_hosts.exists():
-        try:
-            gitops.ensure_known_hosts(paths.known_hosts)
-            row(True, "known_hosts", "matches pinned GitHub ed25519 key")
-        except gitops.GitError as e:
-            row(False, "known_hosts", str(e))
-    if paths.home.exists():
-        mode = paths.home.stat().st_mode & 0o777
-        row(mode & 0o077 == 0, "state dir mode", f"{oct(mode)}")
-    for pr in compat.probe_host():
-        row(pr.status == "ok", f"tool {pr.name}", pr.detail, hard=False)
-    if a.workflow:
-        for f in compat.scan_workflow_text(Path(a.workflow).read_text()):
-            print(f"[{f.severity:7}] {a.workflow}:{f.line} {f.id}: {f.message}")
-            bad += f.severity == "blocker"
-    return 1 if bad else 0
+def _gate(paths):
+    def gate():
+        bad = [c for c in readiness.run_checks(readiness.Ctx.real(), paths, PIN_FILE) if c.level == "fail"]
+        if bad:
+            raise InstallError("not ready - doctor failures: " + "; ".join(f"{c.name}: {c.detail}" for c in bad))
+    return gate
+
+
+def cmd_attest(a, paths):
+    me = readiness.Ctx.real()
+    lines = [f"user {me.username} (uid {os.getuid()}) must be a standard macOS user (or a disposable VM) used ONLY for this runner,",
+             "with no personal SSH keys, browser sessions, cloud-drive data or private credentials other than the runner",
+             "credential and the two read-only submodule deploy keys."]
+    if not a.apply:
+        _plan("attest-dedicated-user", lines + [f"write {paths.attest}"])
+        return 0
+    paths.home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    paths.attest.write_text(json.dumps({"tool": safety.TOOL, "user": me.username, "uid": os.getuid(),
+                                        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}))
+    print(f"attestation written to {paths.attest}")
+    return 0
+
+
+def cmd_hook(a, paths):
+    if a.which == "job-started":
+        hooks.job_started(os.environ, paths)
+    else:
+        print(json.dumps(hooks.job_completed(os.environ, paths)))
+    return 0
+
+
+def cmd_report(a, paths):
+    rep = report.build(os.environ, a.results_dir, a.job_status, paths)
+    d = report.write(rep, paths, os.environ.get("GITHUB_STEP_SUMMARY"))
+    print(f"report: {d}/report.json")
+    return 0
+
+
+def cmd_clean(a, paths):
+    if paths.work_dir.exists() and not safety.is_owned(paths.work_dir, paths.home):
+        raise safety.SafetyError(f"{paths.work_dir} lacks a valid ownership marker")
+    entries = sorted(paths.work_dir.iterdir()) if paths.work_dir.is_dir() else []
+    entries = [e for e in entries if e.name != safety.MARKER]
+    if not a.apply:
+        _plan("clean", [f"remove {e}" for e in entries] or ["nothing to remove"])
+        print("  - caches NOT touched (review by hand): " + ", ".join(str(Path.home() / c) for c in CACHE_PATHS))
+        return 0
+    ps = subprocess.run(["ps", "-axo", "args"], capture_output=True, text=True).stdout
+    if "Runner.Worker" in ps:
+        raise safety.SafetyError("a runner job is in progress (Runner.Worker is running); refusing to clean")
+    n = safety.safe_clean_owned_root(paths.work_dir, paths.home)
+    print(f"cleaned {n} entries from {paths.work_dir}")
+    return 0
+
+
+def cmd_verify_pin(a, paths):
+    problems, notes = pincheck.check_pin(Pin.load(PIN_FILE))
+    for n in notes:
+        print(f"note: {n}")
+    for p in problems:
+        print(f"MISMATCH: {p}", file=sys.stderr)
+    if not problems:
+        print("runner-pin.json matches the official release metadata")
+    return 1 if problems else 0
 
 
 def cmd_install(a, paths):
@@ -103,8 +141,9 @@ def cmd_uninstall(a, paths):
     if not _mode(a, "uninstall"):
         _plan("uninstall", inst.plan_uninstall())
         return 0
-    inst.apply_uninstall()
-    print("uninstalled service + runner directory; deregister the runner on GitHub manually")
+    for n in inst.apply_uninstall():
+        print(f"note: {n}")
+    print("uninstalled service, runner, work dir, app and launcher; deregister the runner on GitHub manually")
     return 0
 
 
@@ -179,7 +218,12 @@ def cmd_cancel(a, paths):
 def build_parser():
     p = argparse.ArgumentParser(prog="repli-local-ci", description="Safe local CI manager around the official GitHub self-hosted runner.")
     sub = p.add_subparsers(dest="cmd", required=True)
-    d = sub.add_parser("doctor", help="read-only environment checks"); d.add_argument("--workflow")
+    d = sub.add_parser("doctor", help="read-only readiness checks; non-zero if any mandatory prerequisite fails"); d.add_argument("--workflow")
+    at = sub.add_parser("attest-dedicated-user", help="record that this account is dedicated to the runner"); _add_mode(at)
+    hk = sub.add_parser("hook", help="runner job hook (called by the runner, not by hand)"); hk.add_argument("which", choices=["job-started", "job-completed"])
+    rp = sub.add_parser("report", help="write a local report for the current CI job"); rp.add_argument("--results-dir", required=True); rp.add_argument("--job-status", default="unknown")
+    cl = sub.add_parser("clean", help="clean the managed runner work dir"); _add_mode(cl)
+    sub.add_parser("verify-pin", help="compare runner-pin.json with official release metadata (network)")
     for n, h in (("install", "download+verify runner, write LaunchAgent"), ("register", "register runner (admin token, manual gate)"),
                  ("uninstall", "remove service + runner dir")):
         sp = sub.add_parser(n, help=h); _add_mode(sp)
@@ -203,7 +247,7 @@ def build_parser():
 def main(argv=None) -> int:
     a = build_parser().parse_args(argv)
     paths = Paths.from_env()
-    fn = globals()[f"cmd_{a.cmd}"]
+    fn = globals()["cmd_" + a.cmd.replace("-dedicated-user", "").replace("-", "_")]
     try:
         return fn(a, paths)
     except (safety.SafetyError, InstallError, gitops.GitError) as e:

@@ -1,10 +1,13 @@
 """Fully synthetic fixtures. Nothing here touches the network, REPLI, or any real runner."""
 from __future__ import annotations
 
+import gc
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 SYNTH_REPO = "syuan33/repli"  # allow-listed *name* only; the remote is always a local bare repo
@@ -54,8 +57,36 @@ class Remote:
         return str(self.bare)
 
 
-class TmpCase(unittest.TestCase):
+class StrictCase(unittest.TestCase):
+    """Fails any test that leaks a process/file/socket.
+
+    `-W error` alone is NOT enough: ResourceWarning is raised inside object finalizers, where Python only prints
+    "Exception ignored" and the test still passes. This base class records both the warning and the unraisable
+    exception, forces a gc pass after the test (and after all cleanups registered later), and fails.
+    """
+
     def setUp(self):
+        self._leaks = []
+        self._old_hook = sys.unraisablehook
+        sys.unraisablehook = lambda u: self._leaks.append(f"unraisable: {u.exc_type.__name__}: {u.exc_value}")
+        self._wctx = warnings.catch_warnings(record=True)
+        self._wlog = self._wctx.__enter__()
+        warnings.simplefilter("always", ResourceWarning)
+        self.addCleanup(self._strict_check)  # registered first => runs last (after other cleanups)
+
+    def _strict_check(self):
+        gc.collect()
+        gc.collect()
+        self._wctx.__exit__(None, None, None)
+        sys.unraisablehook = self._old_hook
+        leaks = self._leaks + [f"{w.category.__name__}: {w.message}" for w in self._wlog if issubclass(w.category, ResourceWarning)]
+        if leaks:
+            self.fail("resource leak(s) detected: " + "; ".join(leaks))
+
+
+class TmpCase(StrictCase):
+    def setUp(self):
+        super().setUp()
         self._td = tempfile.TemporaryDirectory()
         self.addCleanup(self._td.cleanup)
         self.tmp = Path(self._td.name).resolve()

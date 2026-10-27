@@ -1,40 +1,43 @@
-# Threat model - repli-local-ci
+# Threat model - repli-local-ci (revision 2)
 
-**Headline limitation:** a self-hosted runner executes repository code (`dev/verify.sh`, its dependencies, and the
-workflow file) as your macOS user. It is *not* isolated like a GitHub-hosted VM. Everything below reduces risk; none
-of it makes untrusted code safe. Only run code you would run in your own terminal.
+**Headline limitation:** a self-hosted runner executes repository code (`dev/verify.sh`, its dependencies, **and the workflow
+file**) as the runner's macOS user. It is *not* isolated like a GitHub-hosted VM. Nothing here validates, or claims equivalence
+with, the REPLI canonical gate, and nothing has been run on a real runner.
 
-## Assets
-Your user account and home directory, SSH keys / agent, other repos, browser sessions, LAN access, the runner credential,
-GitHub tokens in the environment, the integrity of the "verify passed" signal.
+## Mandatory production precondition
+The runner runs in a **dedicated standard (non-admin) macOS user or a disposable VM** holding no personal SSH keys, browser
+sessions, cloud-drive data or private credentials, other than the minimum repository-scoped runner credential (and the two
+read-only submodule deploy keys, held only as Actions secrets and written to `$RUNNER_TEMP` for one step). This is enforced
+mechanically where possible (`doctor`, `register --apply`, `start`: non-admin, non-root, personal-data path existence, human
+attestation) and is otherwise a procedural requirement. Existence checks are heuristic: they cannot prove a machine is clean.
 
-## Actors
-- Trusted: you; same-repo branch writers of `syuan33/repli`.
-- Untrusted: fork authors, anyone who can open PRs from forks, compromised dependencies, network attackers (DNS/MITM).
+## Assets / actors
+Assets: the runner account and its disk, the runner credential, the two deploy keys while materialised, the integrity of the
+"verify passed" signal. Trusted: the owner, same-repo branch writers of `syuan33/repli`. Untrusted: fork authors, compromised
+dependencies, network attackers.
 
 ## Threats and controls
-| # | Threat | Control (where) | Residual risk |
+| # | Threat | Control | Residual risk |
 |---|---|---|---|
-| 1 | Fork/external PR code runs on the Mac | allow-list `syuan33/repli` (`safety.validate_repo`); head repo must equal repo (`validate_head_repo`); example workflow `if:` guard | A skipped job satisfies a required check - not "verified". Public repo + "run workflows from fork PRs" setting must stay restrictive (admin) |
-| 2 | Branch moves mid-run / TOCTOU | full 40-hex SHA required; fetched by SHA; `HEAD == sha` asserted; `--branch` resolved once | none known |
-| 3 | Workflow tampering by a same-repo writer | none in this tool (runner executes PR-head workflow) | **Open.** Restrict branch write access; consider environments/required reviewers; ADR option B avoids it |
-| 4 | Dirty/reused workspace poisoning | `os.mkdir` fresh dir per run, refuses existing; checkout dir must be empty and clean | persistent caches in `$HOME` (Maven, npm, ...) are shared and can be poisoned by earlier code |
-| 5 | Secret leakage to logs/reports | redactor on every log line (tokens, auth headers, `*_TOKEN=`, URL creds, PEM blocks); env allow-list for verify (no `GITHUB_*`, no ssh agent); never reads `.env`/keys | Redaction is pattern-based, not a guarantee; repo code can read files in your home |
-| 6 | Token in argv/history/fixtures | registration token only via env of the child (`ACTIONS_RUNNER_INPUT_TOKEN`) from `REPLI_RUNNER_TOKEN`/stdin; tested | token is visible to same-user processes via the environment during `config.sh` |
-| 7 | Tampered runner download | pinned version, official URL prefix enforced, SHA-256 verified before extraction, tar path/link validation, https only | the hash must be copied by a human from the official release notes (`runner-pin.json` ships with `null`, install refuses) |
-| 8 | MITM of git over SSH | pinned GitHub ed25519 host key, `StrictHostKeyChecking=yes`, own known_hosts, mismatch fails closed | key rotation by GitHub requires a reviewed code change |
-| 9 | Wrong repo / malicious submodule | origin URL must parse to `github.com/<repo>`; every `.gitmodules` URL must be a github ssh/https URL for an allow-listed submodule (default: none) | submodule allow-list is code/config, review it |
-| 10 | Running as root / privilege | LaunchAgent in `gui/<uid>`, no `UserName`, every mutating command refuses euid 0 | - |
-| 11 | Cleanup deletes wrong files | `safe_remove` requires: real dir (no symlink), strictly inside root, same uid, marker file whose recorded path equals the dir; symlinks inside are unlinked, not followed | - |
-| 12 | `stop` kills unrelated processes | only `launchctl bootout gui/<uid>/<our label>`; verify kills only its own process group | processes that `setsid` out of the group survive |
-| 13 | Resource exhaustion / queue abuse | concurrency 1, dedupe by (repo, sha), newer head of same ref supersedes, timeout (default 1h) | no CPU/disk quotas |
-| 14 | Stale lock after crash | dead-pid detection reclaims the slot | PID reuse could delay reclaim (fails safe: slot stays busy) |
-| 15 | False assurance | every report carries the "not the canonical merge gate" disclaimer | humans must read it |
+| 1 | Fork/external PR code runs | job `if:` + **runner `job-started` hook** (repo allow-list, event allow-list, `head.repo == base.repo == repo`, `fork == false`, integration ref `refs/pull/N/merge`) - the hook is runner config, not editable by a PR | repository/org settings for fork workflows are admin-only; a skipped job satisfies required checks, so a same-name hosted job fails forks (branch-protection semantics untested) |
+| 2 | Verifying different content than GitHub's merge result | official `actions/checkout` of `GITHUB_SHA` + `HEAD == GITHUB_SHA` assertion; no nested fetch of head SHA | none known |
+| 3 | **Workflow tampering by a same-repo writer** (PR-head workflow runs on the Mac) | **OPEN.** Hooks bound *what repo/event* may run but cannot constrain what a permitted PR's workflow does | Anyone with branch write access can run arbitrary code as the runner user. Mitigate by restricting write access, the dedicated account/VM (limits blast radius), and treating the account as compromisable |
+| 4 | Persistent state poisoning (workspace, `_work`, npm/pip/Maven/Gradle/tool caches, `~/.local`) | `job-completed` hook empties the checkout and credential-shaped files; fresh `actions/checkout`; `clean --apply` empties the managed work dir | user-level caches (`~/.npm`, `~/.m2`, `~/.gradle`, `~/.cache`, `Library/Caches`, runner `_tool`) persist and can be poisoned by earlier jobs; purge them by hand (RUNBOOK) or rebuild the VM |
+| 5 | Secret leakage | submodule keys only in env of one step, written under `$RUNNER_TEMP`, `trap` cleanup + hook cleanup; nothing in `~/.ssh` or global git config; log/report redaction; no `.env`/key reads | redaction is pattern-based; repo code can read anything in the account |
+| 6 | Registration token exposure | passed only via child env (`ACTIONS_RUNNER_INPUT_TOKEN`), never argv/disk/logs; admin gate | visible to same-user processes while `config.sh` runs; env-var mechanism not validated against a real runner |
+| 7 | Tampered runner download | pinned version + SHA-256 in repo, official-URL-prefix check, hash before extract, validated tar | hash was independently derived by downloading the official asset and matches the value supplied at review; `verify-pin`/CI compares against release metadata (not runnable from the authoring sandbox) |
+| 8 | MITM / wrong host key | workflow: fail-closed Ed25519 fingerprint check; manager: pinned known_hosts | GitHub key rotation needs a reviewed change |
+| 9 | Wrong repo / submodule | repo allow-list; submodule allow-list (default none) for `run`; workflow uses fixed `insteadOf` URLs | - |
+| 10 | Root / privilege | LaunchAgent, no `UserName`; all mutating commands and hooks refuse euid 0; non-admin required | - |
+| 11 | Cleanup deletes wrong files | marker + uid + realpath + no-symlink checks; hook cleaning only inside marker-owned `work/`; launcher removed only if byte-identical to manifest | - |
+| 12 | `stop` kills unrelated processes | only `launchctl bootout gui/<uid>/<label>`; no signals to other PIDs | `run` kills its own process group only; `setsid` escapees survive |
+| 13 | Resource exhaustion / queue abuse | runner runs one job at a time; `run` queue is concurrency 1 with dedupe/supersede and a timeout | no CPU/disk quotas |
+| 14 | False assurance | reports/summaries carry the "not the canonical merge gate" disclaimer | humans must read it |
+| 15 | Manager unavailable / drifted at run time | step 1 `doctor` fails the job; launcher hash checked against manifest | - |
 
-## Out of scope / not addressed
-Kernel/hypervisor isolation, dedicated user or VM (strongly recommended: run the runner under a dedicated standard macOS
-user or a Tart/UTM VM), network egress filtering, supply-chain attacks on dependencies of REPLI.
+## Not addressed
+VM/kernel isolation beyond the dedicated account, egress filtering, dependency supply chain, GitHub-side compromise.
 
-## GitHub admin actions (cannot be done by this tool)
-Creating the runner registration/removal token; enabling/disabling self-hosted runners and fork-workflow policies; editing
-branch protection / required checks; merging the REPLI workflow change.
+## GitHub admin actions (not performable by this tool)
+Registration/removal tokens; enabling self-hosted runners and fork-workflow policy; secrets; branch protection / required
+checks; merging the REPLI workflow change.

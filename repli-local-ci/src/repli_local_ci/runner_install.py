@@ -13,7 +13,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from . import launchd, safety
+from . import __version__, launchd, safety, selfinstall
 from .config import CUSTOM_LABEL, Paths
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -100,8 +100,8 @@ def default_executor(argv, env=None, cwd=None) -> int:
 
 
 class Installer:
-    def __init__(self, paths: Paths, pin: Pin, executor=default_executor, fetch=default_fetch, euid=None, uid=None):
-        self.p, self.pin, self.exec, self.fetch = paths, pin, executor, fetch
+    def __init__(self, paths: Paths, pin: Pin, executor=default_executor, fetch=default_fetch, euid=None, uid=None, gate=None):
+        self.p, self.pin, self.exec, self.fetch, self.gate = paths, pin, executor, fetch, gate  # gate: callable raising if not ready
         self.euid, self.uid = euid, uid if uid is not None else os.getuid()
 
     def _guard(self):
@@ -115,6 +115,9 @@ class Installer:
             f"download {pin.url}",
             f"verify SHA-256 == {pin.sha256 or '<NOT PINNED - apply will refuse>'}",
             f"extract (validated, no links outside) into {self.p.runner_dir} and write ownership marker",
+            f"copy the manager into {self.p.app_dir} and write launcher {self.p.launcher} (user-owned PATH location; no source checkout needed)",
+            f"create managed runner work dir {self.p.work_dir} (ownership marker) and runner hooks in {self.p.hooks_dir}",
+            f"write {self.p.runner_dir}/.env (job hooks + PATH)",
             f"write LaunchAgent {self.p.plist} (user agent, no root, not started)",
             "NOT done: register runner, start service, change GitHub settings",
         ]
@@ -127,19 +130,25 @@ class Installer:
             raise InstallError(f"{self.p.runner_dir} already exists; run uninstall first (upgrade = uninstall + install)")
         self.p.home.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.p.logs.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if self.p.app_dir.exists() or self.p.work_dir.exists():
+            raise InstallError("app/work directory already exists; run uninstall first")
         tgz = self.p.downloads / self.pin.asset
         download_verified(self.pin.url, tgz, self.pin.sha256, self.fetch)
         tmp = self.p.home / f"runner.tmp-{uuid.uuid4().hex[:8]}"
         try:
             safe_extract(tgz, tmp)
-            safety.write_marker(tmp)
             os.rename(tmp, self.p.runner_dir)
         finally:
             if tmp.exists():
                 shutil.rmtree(tmp, ignore_errors=True)
-        marker = self.p.runner_dir / safety.MARKER  # path inside marker must match final location
-        marker.unlink()
         safety.write_marker(self.p.runner_dir)
+        selfinstall.install_app(self.p, Path(__file__).resolve().parent, __version__)
+        os.mkdir(self.p.work_dir, 0o700)
+        safety.write_marker(self.p.work_dir)
+        env_lines = [f"ACTIONS_RUNNER_HOOK_JOB_STARTED={self.p.hooks_dir / 'job-started.sh'}",
+                     f"ACTIONS_RUNNER_HOOK_JOB_COMPLETED={self.p.hooks_dir / 'job-completed.sh'}",
+                     f"PATH={launchd.runner_path(self.p)}"]
+        (self.p.runner_dir / ".env").write_text("\n".join(env_lines) + "\n")
         self.p.launch_agents.mkdir(parents=True, exist_ok=True)
         self.p.plist.write_bytes(plistlib.dumps(launchd.render_plist(self.p)))
 
@@ -151,15 +160,18 @@ class Installer:
         safety.validate_repo(repo)
         return [
             f"run {self.p.runner_dir}/config.sh --unattended --url https://github.com/{repo} --labels {CUSTOM_LABEL} "
-            f"--name {self._runner_name()} --work {self.p.home}/work",
+            f"--name {self._runner_name()} --work {self.p.work_dir}",
             "the registration token is passed ONLY via env ACTIONS_RUNNER_INPUT_TOKEN (from $REPLI_RUNNER_TOKEN or stdin), never argv",
             "REQUIRES: GitHub repo admin to create the token (Settings > Actions > Runners > New self-hosted runner)",
             "REQUIRES: explicit user approval (--i-have-admin-approval)",
+            "REQUIRES: `doctor` passing in full, including the dedicated-user precondition (checked again at apply time)",
         ]
 
     def apply_register(self, repo, token, confirm_admin_approved):
         self._guard()
         safety.validate_repo(repo)
+        if self.gate:
+            self.gate()
         if not confirm_admin_approved:
             raise InstallError("registration needs explicit approval (--i-have-admin-approval)")
         if not token:
@@ -169,10 +181,11 @@ class Installer:
             raise InstallError("runner is not installed")
         if (self.p.runner_dir / ".runner").exists():
             raise InstallError("runner already registered; uninstall first")
-        env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG") if k in os.environ}
+        env = {k: os.environ[k] for k in ("HOME", "LANG") if k in os.environ}
+        env["PATH"] = launchd.runner_path(self.p)  # config.sh records this into the runner's .path
         env["ACTIONS_RUNNER_INPUT_TOKEN"] = token
         rc = self.exec([str(cfg), "--unattended", "--url", f"https://github.com/{repo}", "--labels", CUSTOM_LABEL,
-                        "--name", self._runner_name(), "--work", str(self.p.home / "work")], env=env, cwd=str(self.p.runner_dir))
+                        "--name", self._runner_name(), "--work", str(self.p.work_dir)], env=env, cwd=str(self.p.runner_dir))
         if rc:
             raise InstallError(f"config.sh failed with exit code {rc}")
 
@@ -185,6 +198,8 @@ class Installer:
 
     def apply_start(self):
         self._guard()
+        if self.gate:
+            self.gate()
         if not self.p.plist.exists():
             raise InstallError("not installed")
         if not (self.p.runner_dir / ".runner").exists():
@@ -202,16 +217,18 @@ class Installer:
         return [
             " ".join(launchd.bootout_cmd(self.uid)),
             f"remove {self.p.plist} (only if its Label is {launchd.LABEL})",
-            f"remove {self.p.runner_dir} (only if it carries this tool's ownership marker)",
-            f"KEPT: {self.p.reports} and {self.p.home}/queue (delete by hand if wanted)",
+            f"remove {self.p.runner_dir}, {self.p.work_dir}, {self.p.app_dir} (each only with a valid ownership marker)",
+            f"remove {self.p.launcher} (only if byte-identical to the launcher recorded in {self.p.manifest})",
+            f"KEPT: {self.p.reports}, {self.p.home}/queue, {self.p.attest} (delete by hand if wanted)",
             "MANUAL: deregister the runner in GitHub (Settings > Actions > Runners) or `config.sh remove` with a removal token (repo admin)",
         ]
 
-    def apply_uninstall(self):
+    def apply_uninstall(self) -> list:
         self._guard()
-        rd = self.p.runner_dir
-        if rd.exists() and not safety.is_owned(rd, self.p.home):
-            raise safety.SafetyError(f"{rd} lacks a valid ownership marker; refusing to delete")
+        for d in (self.p.runner_dir, self.p.work_dir):
+            if d.exists() and not safety.is_owned(d, self.p.home):
+                raise safety.SafetyError(f"{d} lacks a valid ownership marker; refusing to delete")
+        selfinstall.check_app_removable(self.p)
         plist_ours = False
         if self.p.plist.exists():
             try:
@@ -223,5 +240,7 @@ class Installer:
         self.exec(launchd.bootout_cmd(self.uid))
         if plist_ours:
             self.p.plist.unlink()
-        if rd.exists():
-            safety.safe_remove(rd, self.p.home)
+        for d in (self.p.runner_dir, self.p.work_dir):
+            if d.exists():
+                safety.safe_remove(d, self.p.home)
+        return selfinstall.uninstall_app(self.p)

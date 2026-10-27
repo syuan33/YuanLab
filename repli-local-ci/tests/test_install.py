@@ -5,7 +5,7 @@ import plistlib
 import tarfile
 import os
 
-from repli_local_ci import launchd
+from repli_local_ci import launchd, safety
 from repli_local_ci.config import Paths
 from repli_local_ci.runner_install import InstallError, Installer, Pin, download_verified, safe_extract
 from tests.fixtures import TmpCase
@@ -38,7 +38,7 @@ class Recorder:
 class Base(TmpCase):
     def setUp(self):
         super().setUp()
-        self.paths = Paths(self.tmp / "home", launch_agents_dir=self.tmp / "LaunchAgents")
+        self.paths = Paths(self.tmp / "home", launch_agents_dir=self.tmp / "LaunchAgents", bin_dir=self.tmp / "bin")
         self.tar = self.tmp / "r.tar.gz"
         make_tarball(self.tar, {"run.sh": b"#!/bin/sh\n", "config.sh": b"#!/bin/sh\n"})
         self.sha = hashlib.sha256(self.tar.read_bytes()).hexdigest()
@@ -46,8 +46,8 @@ class Base(TmpCase):
         self.fetch = lambda url, dest: dest.write_bytes(self.tar.read_bytes())
         self.rec = Recorder()
 
-    def inst(self, pin=None, euid=1000):
-        return Installer(self.paths, pin or self.pin, self.rec, self.fetch, euid=euid)
+    def inst(self, pin=None, euid=1000, gate=None):
+        return Installer(self.paths, pin or self.pin, self.rec, self.fetch, euid=euid, gate=gate)
 
 
 class Download(Base):
@@ -96,6 +96,11 @@ class Plans(Base):
         self.assertTrue((self.paths.runner_dir / "run.sh").exists())
         self.assertTrue(self.paths.plist.exists())
         self.assertEqual(self.rec.calls, [])  # install never starts the service
+        self.assertTrue(self.paths.launcher.exists())
+        self.assertTrue(safety.is_owned(self.paths.work_dir, self.paths.home))
+        env = (self.paths.runner_dir / ".env").read_text()
+        self.assertIn("ACTIONS_RUNNER_HOOK_JOB_STARTED=" + str(self.paths.hooks_dir / "job-started.sh"), env)
+        self.assertIn(str(self.paths.bin_dir), env)
         pl = plistlib.loads(self.paths.plist.read_bytes())
         self.assertNotIn("UserName", pl)  # LaunchAgent runs as the logged-in user
         self.assertEqual(pl["Label"], launchd.LABEL)
@@ -168,6 +173,31 @@ class StartStopUninstall(Base):
         self.assertFalse(self.paths.plist.exists())
         self.assertFalse(self.paths.runner_dir.exists())
         self.assertTrue(other.exists() and stranger.exists())
+        self.assertFalse(self.paths.launcher.exists() or self.paths.app_dir.exists() or self.paths.work_dir.exists())
+
+    def test_uninstall_leaves_modified_launcher(self):
+        i = self.inst()
+        i.apply_install()
+        self.paths.launcher.write_text("#!/bin/sh\necho mine\n")
+        notes = i.apply_uninstall()
+        self.assertTrue(self.paths.launcher.exists())
+        self.assertTrue(any("left" in n for n in notes))
+        self.assertFalse(self.paths.app_dir.exists())
+
+    def test_install_refuses_to_overwrite_foreign_launcher(self):
+        self.paths.bin_dir.mkdir()
+        self.paths.launcher.write_text("foreign")
+        with self.assertRaises(Exception):
+            self.inst().apply_install()
+        self.assertEqual(self.paths.launcher.read_text(), "foreign")
+
+    def test_uninstall_refuses_unmarked_work_or_app_dir(self):
+        i = self.inst()
+        i.apply_install()
+        (self.paths.work_dir / safety.MARKER).unlink()
+        with self.assertRaises(Exception):
+            i.apply_uninstall()
+        self.assertTrue(self.paths.runner_dir.exists() and self.paths.launcher.exists())
 
     def test_uninstall_refuses_unmarked_runner_dir(self):
         self.paths.runner_dir.mkdir(parents=True)
@@ -175,3 +205,37 @@ class StartStopUninstall(Base):
         with self.assertRaises(Exception):
             self.inst().apply_uninstall()
         self.assertTrue((self.paths.runner_dir / "mine").exists())
+
+
+class Gate(Base):
+    def setUp(self):
+        super().setUp()
+        self.inst().apply_install()
+        (self.paths.runner_dir / ".runner").write_text("{}")
+
+    def failing_gate(self):
+        raise InstallError("not ready - doctor failures: dedicated user")
+
+    def test_gate_blocks_register_and_start_without_side_effects(self):
+        (self.paths.runner_dir / ".runner").unlink()
+        i = self.inst(gate=self.failing_gate)
+        with self.assertRaises(InstallError):
+            i.apply_register("syuan33/repli", TOKEN, True)
+        (self.paths.runner_dir / ".runner").write_text("{}")
+        with self.assertRaises(InstallError):
+            i.apply_start()
+        self.assertEqual(self.rec.calls, [])
+
+    def test_register_uses_managed_work_dir_and_path(self):
+        (self.paths.runner_dir / ".runner").unlink()
+        self.inst(gate=lambda: None).apply_register("syuan33/repli", TOKEN, True)
+        argv, env, _ = self.rec.calls[0]
+        self.assertEqual(argv[argv.index("--work") + 1], str(self.paths.work_dir))
+        self.assertTrue(env["PATH"].startswith(str(self.paths.bin_dir)))
+
+    def test_shipped_pin_is_populated_and_official(self):
+        from pathlib import Path
+        pin = Pin.load(Path(__file__).resolve().parents[1] / "runner-pin.json")
+        self.assertTrue(pin.pinned)
+        self.assertEqual((pin.version, pin.sha256), ("2.338.2", "25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388"))
+        self.assertEqual(pin.url, "https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-osx-arm64-2.338.2.tar.gz")

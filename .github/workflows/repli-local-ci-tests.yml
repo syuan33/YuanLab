@@ -4,19 +4,73 @@ on:
   pull_request:
     paths: ["repli-local-ci/**", ".github/workflows/repli-local-ci-tests.yml"]
   workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1"
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  test-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.13"]
+    defaults:
+      run:
+        working-directory: repli-local-ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # -X dev -W error + StrictCase: a leaked process/file fails the test (ResourceWarning in a finalizer would
+      # otherwise only print "Exception ignored"). Synthetic fixtures only: no network, no runner, no REPLI.
+      - name: Unit tests (warnings are errors)
+        run: PYTHONPATH=src:. python -X dev -W error -m unittest discover -s tests -t . -v
+      - name: Smoke test (synthetic)
+        run: ./scripts/smoke-local.sh
+
+  # GitHub-hosted macOS arm64 runner: evidence for Apple's own /usr/bin/python3 and BSD userland.
+  # Still synthetic only: it never registers a runner, installs a LaunchAgent or touches REPLI.
+  test-macos:
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: repli-local-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Platform
+        run: |
+          uname -m
+          /usr/bin/python3 --version
+          git --version
+      - name: Unit tests with Apple python3 (warnings are errors)
+        run: PYTHONPATH=src:. /usr/bin/python3 -X dev -W error -m unittest discover -s tests -t . -v
+      - name: Smoke test with Apple python3
+        run: PYTHON=/usr/bin/python3 ./scripts/smoke-local.sh
+      - name: Dry-runs only (no side effects)
+        run: |
+          set -x
+          export REPLI_LOCAL_CI_HOME="$RUNNER_TEMP/rlci-home"
+          bin/repli-local-ci install --dry-run
+          bin/repli-local-ci register --dry-run
+          bin/repli-local-ci start --dry-run
+          bin/repli-local-ci uninstall --dry-run
+          test ! -e "$REPLI_LOCAL_CI_HOME"
+      - name: doctor must report NOT READY on an unprovisioned hosted VM
+        run: |
+          if bin/repli-local-ci doctor; then echo "doctor unexpectedly passed"; exit 1; fi
+
+  pin-check:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: repli-local-ci
     steps:
       - uses: actions/checkout@v4
-      - name: Unit tests (synthetic fixtures only; no network, no runner, no REPLI)
-        run: PYTHONPATH=src:. python3 -W error::ResourceWarning -m unittest discover -s tests -t . -v
-      - name: Smoke test (synthetic)
-        run: ./scripts/smoke-local.sh
+      - name: runner-pin.json must match the official release metadata
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./bin/repli-local-ci verify-pin
