@@ -28,6 +28,7 @@ class Doctor(TmpCase):
         self.exe = str(self.paths.launcher)
         self.missing = set()
         self.exe_path = None
+        self.runner_version = lambda d: "2.338.2"
 
     def which(self, n):
         if n in self.missing:
@@ -38,7 +39,7 @@ class Doctor(TmpCase):
 
     def checks(self, pin=PIN, wf=WF, **over):
         kw = dict(self.kw, **over)
-        return run_checks(Ctx(which=self.which, **kw), self.paths, pin, wf)
+        return run_checks(Ctx(which=self.which, runner_version=self.runner_version, **kw), self.paths, pin, wf)
 
     def failed(self, checks):
         return {c.name for c in checks if c.level == "fail"}
@@ -121,6 +122,32 @@ class Doctor(TmpCase):
         self.assertTrue(any(x.name == "allow-list config" and x.level == "ok" for x in self.checks()))
         os.chmod(self.paths.config_file, 0o644)
         self.assertNotReady(self.checks(), "allow-list config")
+
+    def test_installed_runner_version_must_match_the_pin(self):
+        from local_ci_runner import safety
+        from local_ci_runner.runner_install import InstallError
+        self.paths.runner_dir.mkdir()
+        safety.write_marker(self.paths.runner_dir)
+        c = self.checks()  # match
+        self.assertEqual(exit_code(c), 0)
+        self.assertTrue(any(x.name == "runner version" and x.level == "ok" for x in c))
+        self.runner_version = lambda d: "2.338.1"  # mismatch
+        self.assertNotReady(self.checks(), "runner version")
+
+        def missing(d):
+            raise InstallError("installed runner not found or not executable")
+
+        def malformed(d):
+            raise InstallError("installed runner reported an unusable version")
+        for fn in (missing, malformed):
+            self.runner_version = fn
+            self.assertNotReady(self.checks(), "runner version")
+
+    def test_not_installed_runner_is_informational_only(self):
+        self.assertFalse(self.paths.runner_dir.exists())
+        c = self.checks()
+        self.assertEqual(exit_code(c), 0)
+        self.assertFalse(any(x.name == "runner version" for x in c))
 
     def test_state_and_known_hosts(self):
         os.chmod(self.paths.home, 0o755)

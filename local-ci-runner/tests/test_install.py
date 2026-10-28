@@ -7,7 +7,8 @@ import os
 
 from local_ci_runner import launchd, safety
 from local_ci_runner.config import Paths
-from local_ci_runner.runner_install import InstallError, Installer, Pin, download_verified, safe_extract
+from local_ci_runner.runner_install import (InstallError, Installer, Pin, download_verified, installed_version, safe_extract,
+                                              verify_installed_version)
 from tests.fixtures import TmpCase
 
 TOKEN = "AFAKEREGISTRATIONTOKEN0000000000"  # synthetic
@@ -46,8 +47,9 @@ class Base(TmpCase):
         self.fetch = lambda url, dest: dest.write_bytes(self.tar.read_bytes())
         self.rec = Recorder()
 
-    def inst(self, pin=None, euid=1000, gate=None):
-        return Installer(self.paths, pin or self.pin, self.rec, self.fetch, euid=euid, gate=gate)
+    def inst(self, pin=None, euid=1000, gate=None, probe=None):
+        return Installer(self.paths, pin or self.pin, self.rec, self.fetch, euid=euid, gate=gate,
+                         version_probe=probe or (lambda d: (pin or self.pin).version))
 
 
 class Download(Base):
@@ -169,7 +171,7 @@ class Register(Base):
             def __call__(self, argv, env=None, cwd=None):
                 super().__call__(argv, env, cwd)
                 return 1
-        i = Installer(self.paths, self.pin, Fail(), self.fetch, euid=1000)
+        i = Installer(self.paths, self.pin, Fail(), self.fetch, euid=1000, version_probe=lambda d: self.pin.version)
         with self.assertRaises(InstallError):
             i.apply_register("example-org/example-repo", TOKEN, confirm_admin_approved=True)
         self.assertFalse(self.paths.config_file.exists())
@@ -272,3 +274,106 @@ class Gate(Base):
         self.assertTrue(pin.pinned)
         self.assertEqual((pin.version, pin.sha256), ("2.338.2", "25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388"))
         self.assertEqual(pin.url, "https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-osx-arm64-2.338.2.tar.gz")
+
+
+class DisableUpdate(Base):
+    """The pinned, checksum-verified runner must never auto-update: registration always passes --disableupdate."""
+
+    def setUp(self):
+        super().setUp()
+        self.inst().apply_install()
+
+    def expected_argv(self, i):
+        return [str(self.paths.runner_dir / "config.sh"), "--unattended", "--url", "https://github.com/example-org/example-repo",
+                "--labels", "local-ci-runner", "--name", i._runner_name(), "--work", str(self.paths.work_dir), "--disableupdate"]
+
+    def test_exact_registration_argv_includes_disableupdate_and_never_the_token(self):
+        i = self.inst()
+        i.apply_register("example-org/example-repo", TOKEN, confirm_admin_approved=True)
+        argv, env, cwd = self.rec.calls[0]
+        self.assertEqual(argv, self.expected_argv(i))
+        self.assertIn("--disableupdate", argv)
+        self.assertNotIn(TOKEN, " ".join(argv))
+        self.assertEqual(env["ACTIONS_RUNNER_INPUT_TOKEN"], TOKEN)  # token only via the child's environment
+        self.assertNotIn("--token", argv)
+
+    def test_displayed_plan_is_the_same_command(self):
+        i = self.inst()
+        plan = i.plan_register("example-org/example-repo")
+        self.assertIn("run " + " ".join(self.expected_argv(i)), plan)
+        self.assertTrue(any("--disableupdate" in line for line in plan))
+        self.assertNotIn(TOKEN, " ".join(plan))
+
+
+def make_fake_runner(runner_dir, body, mode=0o755):
+    exe = runner_dir / "bin" / "Runner.Listener"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text("#!/bin/sh\n" + body + "\n")
+    exe.chmod(mode)
+    return exe
+
+
+class InstalledVersion(Base):
+    """Uses a real (synthetic) executable standing in for the official `bin/Runner.Listener --version`; no network."""
+
+    def probe(self, body, mode=0o755):
+        make_fake_runner(self.paths.runner_dir, body, mode)
+        return installed_version(self.paths.runner_dir)
+
+    def test_match(self):
+        self.paths.runner_dir.mkdir(parents=True)
+        self.assertEqual(self.probe('[ "$1" = "--version" ] && echo 9.9.9'), "9.9.9")
+        self.assertEqual(verify_installed_version(self.paths.runner_dir, self.pin), "9.9.9")
+
+    def test_mismatch(self):
+        self.paths.runner_dir.mkdir(parents=True)
+        make_fake_runner(self.paths.runner_dir, "echo 9.9.10")
+        with self.assertRaises(InstallError) as c:
+            verify_installed_version(self.paths.runner_dir, self.pin)
+        self.assertIn("!=", str(c.exception))
+
+    def test_missing_or_unusable_executable(self):
+        self.paths.runner_dir.mkdir(parents=True)
+        with self.assertRaises(InstallError):
+            installed_version(self.paths.runner_dir)  # no bin/Runner.Listener
+        exe = make_fake_runner(self.paths.runner_dir, "echo 9.9.9", mode=0o644)
+        with self.assertRaises(InstallError):
+            installed_version(self.paths.runner_dir)  # not executable
+        exe.unlink()
+        real = self.tmp / "real"
+        real.write_text("#!/bin/sh\necho 9.9.9\n")
+        real.chmod(0o755)
+        exe.symlink_to(real)
+        with self.assertRaises(InstallError):
+            installed_version(self.paths.runner_dir)  # symlink
+
+    def test_malformed_output(self):
+        self.paths.runner_dir.mkdir(parents=True)
+        for body in ["", "echo", "echo garbage", "echo 9.9", "echo v9.9.9", "echo 9.9.9-rc1", "echo '9.9.9 extra'", "echo 9.9.9; echo 9.9.9",
+                     "echo 9.9.9; exit 1", "exit 3", "echo ' ' "]:
+            make_fake_runner(self.paths.runner_dir, body)
+            with self.assertRaises(InstallError, msg=body):
+                installed_version(self.paths.runner_dir)
+
+
+class StartRegisterVersionGate(Base):
+    def setUp(self):
+        super().setUp()
+        self.inst().apply_install()
+        (self.paths.runner_dir / ".runner").write_text("{}")
+
+    def test_start_refuses_on_mismatch_missing_or_malformed(self):
+        for probe in (lambda d: "9.9.10", lambda d: (_ for _ in ()).throw(InstallError("missing")),
+                      lambda d: (_ for _ in ()).throw(InstallError("malformed"))):
+            with self.assertRaises(InstallError):
+                self.inst(probe=probe).apply_start()
+        self.assertEqual(self.rec.calls, [])  # launchctl never called
+        self.inst().apply_start()
+        self.assertEqual(self.rec.calls[-1][0][:2], ["launchctl", "bootstrap"])
+
+    def test_register_refuses_when_installed_runner_is_not_the_pinned_one(self):
+        (self.paths.runner_dir / ".runner").unlink()
+        with self.assertRaises(InstallError):
+            self.inst(probe=lambda d: "1.0.0").apply_register("example-org/example-repo", TOKEN, confirm_admin_approved=True)
+        self.assertEqual(self.rec.calls, [])
+        self.assertFalse(self.paths.config_file.exists())

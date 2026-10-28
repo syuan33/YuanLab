@@ -15,7 +15,7 @@ from pathlib import Path
 
 from . import allowlist, compat, gitops, safety, selfinstall
 from .config import MIN_GIT, MIN_PYTHON, PERSONAL_DATA_PATHS, REQUIRED_TOOLS, Paths
-from .runner_install import Pin
+from .runner_install import InstallError, Pin, installed_version
 
 Check = namedtuple("Check", "level name detail")  # level: ok | fail | warn | info
 
@@ -23,9 +23,10 @@ Check = namedtuple("Check", "level name detail")  # level: ok | fail | warn | in
 class Ctx:
     """Everything doctor observes about the machine; tests substitute a fake."""
 
-    def __init__(self, system, machine, euid, username, groups, home, py, which, tool_version, exists):
+    def __init__(self, system, machine, euid, username, groups, home, py, which, tool_version, exists, runner_version=None):
         self.system, self.machine, self.euid, self.username, self.groups = system, machine, euid, username, groups
         self.home, self.py, self.which, self.tool_version, self.exists = home, py, which, tool_version, exists
+        self.runner_version = runner_version or installed_version  # callable(runner_dir) -> "x.y.z" or raises InstallError
 
     @classmethod
     def real(cls):
@@ -80,6 +81,7 @@ def run_checks(ctx: Ctx, paths: Paths, pin_file: Path, workflow: Path = None):
     gv = ctx.tool_version("git") if ctx.which("git") else None
     add("ok" if gv and gv >= MIN_GIT else "fail", f"git>={'.'.join(map(str, MIN_GIT))}", "unknown" if not gv else ".".join(map(str, gv)))
 
+    pin = None
     try:
         pin = Pin.load(pin_file)
         add("ok" if pin.pinned else "fail", "runner pin", f"v{pin.version} sha256 " + ("populated" if pin.pinned else "NOT populated"))
@@ -124,6 +126,17 @@ def run_checks(ctx: Ctx, paths: Paths, pin_file: Path, workflow: Path = None):
         add("info", "allow-list config", "not registered yet (created only by the approved `register --apply` step; hooks deny everything until then)")
     if paths.runner_dir.exists():
         add("ok" if safety.is_owned(paths.runner_dir, paths.home) else "fail", "runner dir ownership", str(paths.runner_dir))
+        # No network: asks the installed runner itself. Mismatch / missing / malformed => NOT READY (fail closed).
+        try:
+            got = ctx.runner_version(paths.runner_dir)
+            if pin is None:
+                add("fail", "runner version", f"installed {got}, but the pin could not be loaded")
+            elif got != pin.version:
+                add("fail", "runner version", f"installed {got} != pinned {pin.version} (upgrade = reviewed pin change, then stop/uninstall/install/re-register)")
+            else:
+                add("ok", "runner version", f"{got} == pinned")
+        except InstallError as e:
+            add("fail", "runner version", str(e))
         add("info", "runner registered", str((paths.runner_dir / ".runner").exists()))
     else:
         add("info", "runner installed", "not yet (run install --apply after doctor passes)")

@@ -47,6 +47,15 @@ it, not the source checkout. Uninstall removes the launcher only if it is byte-i
 Runner pin: `runner-pin.json` = v2.338.2, SHA-256 `25a065af…19a388`. Versions are never chosen at runtime; `verify-pin` (also a CI job) fails
 if the pin stops matching official release metadata.
 
+**No runner auto-update.** `register` always passes `--disableupdate` to the official `config.sh` (the displayed plan and the real call use the
+same argv), so the checksum-verified runner can never replace itself. `doctor` and `start` (and `register`) additionally run the installed
+runner's own version command (`bin/Runner.Listener --version`, no network) and **fail closed** unless it prints exactly the pinned version -
+a mismatch, a missing/non-executable runner or malformed output all mean NOT READY / refuse.
+
+**Upgrades are explicit, reviewed pin changes:** change `runner-pin.json` (version, asset, url, sha256 checked against the official release)
+in a reviewed PR, get `verify-pin` green, then `stop` → `uninstall --apply` → `install --apply` → re-register (new admin token) → `start`.
+Stale-runner consequence: GitHub expects self-hosted runners to stay reasonably current: a runner that has fallen too far behind the latest official release may be refused jobs (commonly described as roughly 30 days after a new release - confirm the current rule in GitHub's runner documentation, it was not verified here). With `--disableupdate` the runner will not fix this by itself, so an unreviewed-but-stale runner is an availability risk that you trade for a runner binary that never changes without review.
+
 ## Commands
 ```
 doctor [--workflow FILE]         read-only; exit 1 if ANY mandatory prerequisite fails
@@ -54,7 +63,7 @@ install | uninstall              dry-run unless --apply
 register --repo OWNER/REPO [--verify-command "ci/verify.sh -o {results_dir}"]
                                  dry-run unless --apply; --apply also needs --i-have-admin-approval and a token (env or --token-stdin)
 attest-dedicated-user            dry-run unless --apply
-start | stop [--dry-run] | status
+start | stop [--dry-run] | status        start also refuses unless the installed runner version equals the pin
 clean [--apply]                  empty the managed work dir (refuses while a job runs)
 report --results-dir D --job-status S     local report for the current CI job
 hook job-started|job-completed --home DIR  called by the runner, not by hand
@@ -65,7 +74,7 @@ cancel --repo OWNER/REPO --sha <40-hex>
 **`doctor` mandatory checks (any failure ⇒ exit 1):** Darwin/arm64; not root; non-admin; no personal-data paths + attestation;
 Python ≥ 3.9; `git ≥ 2.32`, `ssh`, `ssh-keyscan`, `ssh-keygen`, `curl`, `unzip`, `shasum`, `awk`, `tr`; runner SHA-256 populated; managed
 launcher on `PATH` and unmodified; no blocker findings in the scanned workflow (default: `examples/example-workflow.yml`);
-allow-list config valid *when present*; pinned `known_hosts`; state-dir mode; runner-dir ownership. **Warnings never change the exit
+installed runner version == `runner-pin.json` (when a runner is installed); allow-list config valid *when present*; pinned `known_hosts`; state-dir mode; runner-dir ownership. **Warnings never change the exit
 code:** GNU tools, Homebrew bash ≥ 4, host node/java. Running `doctor` on Linux or a personal account exits 1 by design.
 
 ### Runner hooks (runner configuration, not workflow content)

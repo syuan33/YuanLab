@@ -36,9 +36,14 @@ Further decisions:
 3. A dedicated standard macOS user or disposable VM is a mandatory production precondition, enforced by `doctor`/`register`/`start`.
 4. The manager installs itself to `~/.local/bin` independent of the source checkout.
 5. Runner version and SHA-256 are pinned in-repo and compared with official metadata only by an explicit command / CI job.
+6. **The runner never auto-updates.** Registration passes `--disableupdate`, and `doctor`/`start`/`register` fail closed unless the installed runner
+   reports exactly the pinned version (`bin/Runner.Listener --version`, no network). Upgrades are explicit, reviewed pin changes followed by
+   stop / uninstall / install / re-register. Rejected alternative: leaving auto-update on - the runner would replace a reviewed, checksum-verified
+   binary with unreviewed code fetched at runtime, contradicting the pinned-runner security model.
 
 ## Consequences / limitations
 - A self-hosted runner executes repository code on your machine and is **not** equivalent to a throw-away hosted VM.
+- Operational consequence of (6): GitHub expects self-hosted runners to stay reasonably current: a runner that has fallen too far behind the latest official release may be refused jobs (commonly described as roughly 30 days after a new release - confirm the current rule in GitHub's runner documentation, it was not verified here). With `--disableupdate` the runner will not fix this by itself, so an unreviewed-but-stale runner is an availability risk that you trade for a runner binary that never changes without review.
 - The workflow file at the PR head decides what runs after the hook passes; same-repo branch writers can change it (open risk).
 - macOS differs from ubuntu images (BSD userland, bash 3.2, no apt, no containers); `doctor --workflow` flags known incompatibilities.
 - Not validated: no real runner has been registered or run. Hosted-macOS CI only exercises synthetic tests.

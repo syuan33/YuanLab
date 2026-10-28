@@ -96,13 +96,48 @@ def safe_extract(tar_path: Path, dest: Path) -> None:
             t.extractall(root, members=members)  # noqa: S202 (members validated above)
 
 
+_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+
+
+def installed_version(runner_dir, run=None) -> str:
+    """Ask the installed official runner for its version (`bin/Runner.Listener --version`). Prints a version only; the call
+    needs no network. Anything but a single clean x.y.z line is an error (fail closed)."""
+    exe = Path(runner_dir) / "bin" / "Runner.Listener"
+    if exe.is_symlink() or not exe.is_file() or not os.access(exe, os.X_OK):
+        raise InstallError(f"installed runner not found or not executable: {exe}")
+    if run is None:
+        env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG") if k in os.environ}
+        try:
+            r = subprocess.run([str(exe), "--version"], capture_output=True, text=True, timeout=30, env=env, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise InstallError(f"could not run the installed runner's version command: {e}")
+        rc, out = r.returncode, r.stdout
+    else:
+        rc, out = run([str(exe), "--version"])
+    text = out.strip() if isinstance(out, str) else ""
+    if rc != 0 or "\n" in text or not _VERSION.fullmatch(text):
+        raise InstallError(f"installed runner reported an unusable version (exit {rc}, output {text[:40]!r})")
+    return text
+
+
+def verify_installed_version(runner_dir, pin, probe=installed_version) -> str:
+    """Fail closed unless the installed runner is exactly the version in runner-pin.json."""
+    got = probe(Path(runner_dir))
+    if got != pin.version:
+        raise InstallError(f"installed runner version {got} != pinned {pin.version}: refusing (upgrades are reviewed pin changes: "
+                           "stop, uninstall, install, re-register)")
+    return got
+
+
 def default_executor(argv, env=None, cwd=None) -> int:
     return subprocess.run(argv, env=env, cwd=cwd).returncode
 
 
 class Installer:
-    def __init__(self, paths: Paths, pin: Pin, executor=default_executor, fetch=default_fetch, euid=None, uid=None, gate=None):
+    def __init__(self, paths: Paths, pin: Pin, executor=default_executor, fetch=default_fetch, euid=None, uid=None, gate=None,
+                 version_probe=installed_version):
         self.p, self.pin, self.exec, self.fetch, self.gate = paths, pin, executor, fetch, gate  # gate: callable raising if not ready
+        self.version_probe = version_probe
         self.euid, self.uid = euid, uid if uid is not None else os.getuid()
 
     def _guard(self):
@@ -157,13 +192,18 @@ class Installer:
     def _runner_name(self):
         return "local-ci-runner-" + re.sub(r"[^A-Za-z0-9-]", "-", socket.gethostname().split(".")[0])[:40]
 
+    def register_argv(self, repo):
+        """The one definition of the config.sh invocation, used by both the displayed plan and the real call.
+        --disableupdate: the pinned, checksum-verified runner must never replace itself; upgrades are reviewed pin changes."""
+        return [str(self.p.runner_dir / "config.sh"), "--unattended", "--url", f"https://github.com/{repo}",
+                "--labels", CUSTOM_LABEL, "--name", self._runner_name(), "--work", str(self.p.work_dir), "--disableupdate"]
+
     def plan_register(self, repo, verify_command=DEFAULT_VERIFY):
         allowlist.validate_repo_name(repo)
         allowlist.validate_command(list(verify_command))
         return [
             f"write protected config {self.p.config_file} (mode 0600, exclusive create): allowed_repos=[{repo}], verify_command={list(verify_command)}",
-            f"run {self.p.runner_dir}/config.sh --unattended --url https://github.com/{repo} --labels {CUSTOM_LABEL} "
-            f"--name {self._runner_name()} --work {self.p.work_dir}",
+            "run " + " ".join(self.register_argv(repo)),
             "the registration token is passed ONLY via env ACTIONS_RUNNER_INPUT_TOKEN (from $LOCAL_CI_RUNNER_TOKEN or stdin), never argv",
             "REQUIRES: GitHub repo admin to create the token (Settings > Actions > Runners > New self-hosted runner)",
             "REQUIRES: explicit user approval (--i-have-admin-approval)",
@@ -185,14 +225,14 @@ class Installer:
             raise InstallError("runner is not installed")
         if (self.p.runner_dir / ".runner").exists():
             raise InstallError("runner already registered; uninstall first")
+        verify_installed_version(self.p.runner_dir, self.pin, self.version_probe)  # never register a runner that is not the pinned one
         env = {k: os.environ[k] for k in ("HOME", "LANG") if k in os.environ}
         env["PATH"] = launchd.runner_path(self.p)  # config.sh records this into the runner's .path
         env["ACTIONS_RUNNER_INPUT_TOKEN"] = token
         if self.p.config_file.exists() or self.p.config_file.is_symlink():
             raise InstallError(f"{self.p.config_file} already exists; uninstall first (the allow-list is never overwritten)")
         allowlist.write(self.p, repo, verify_command)  # explicit, approved registration step creates the allow-list
-        rc = self.exec([str(cfg), "--unattended", "--url", f"https://github.com/{repo}", "--labels", CUSTOM_LABEL,
-                        "--name", self._runner_name(), "--work", str(self.p.work_dir)], env=env, cwd=str(self.p.runner_dir))
+        rc = self.exec(self.register_argv(repo), env=env, cwd=str(self.p.runner_dir))
         if rc:
             allowlist.remove(self.p)
             raise InstallError(f"config.sh failed with exit code {rc}; protected config removed")
@@ -212,6 +252,7 @@ class Installer:
             raise InstallError("not installed")
         if not (self.p.runner_dir / ".runner").exists():
             raise InstallError("runner is not registered (manual, admin-approved step); refusing to start")
+        verify_installed_version(self.p.runner_dir, self.pin, self.version_probe)
         rc = self.exec(launchd.bootstrap_cmd(self.uid, self.p.plist))
         if rc:
             raise InstallError(f"launchctl bootstrap failed ({rc}); already started?")

@@ -30,8 +30,15 @@ every hook denies every job. Repo-admin only: runner token, Actions secrets, for
 Revert `runs-on` in the target repository; `local-ci-runner stop`; optionally `uninstall --dry-run`, then `--apply`, and deregister the runner (admin).
 
 ## Pause / resume / upgrade
-`stop` / `start`. Upgrade the runner: reviewed change to `runner-pin.json` (version, asset, url, sha256 verified against the official
-release), `verify-pin` green, then `stop`, `uninstall --apply`, `install --apply`, re-register with a new token.
+`stop` / `start`.
+
+**Upgrade the runner (never automatic - registration passes `--disableupdate`).** 1) Open a reviewed PR changing `runner-pin.json` (version, asset,
+url, sha256 verified against the official release notes). 2) `verify-pin` and the full suite green. 3) On the runner account: `stop`,
+`uninstall --apply`, `install --apply`, `doctor` (checks the installed version equals the pin), re-register with a new admin token, `start`.
+`start`/`doctor` refuse a runner whose `--version` differs from the pin.
+
+**Stale-runner consequence.** GitHub expects self-hosted runners to stay reasonably current: a runner that has fallen too far behind the latest official release may be refused jobs (commonly described as roughly 30 days after a new release - confirm the current rule in GitHub's runner documentation, it was not verified here). With `--disableupdate` the runner will not fix this by itself, so an unreviewed-but-stale runner is an availability risk that you trade for a runner binary that never changes without review. Review and roll pin updates promptly after official releases (the weekly `pin-check` CI job and `verify-pin` note when a newer
+release exists). If jobs stop being assigned, compare the runner version with the latest release before debugging anything else.
 
 ## Cache and workspace hygiene
 - The hook empties the checkout after each job. With the runner idle: `local-ci-runner clean --apply` (refuses while a job runs).
@@ -43,4 +50,5 @@ release), `verify-pin` green, then `stop`, `uninstall --apply`, `install --apply
 - `doctor` NOT READY: each FAIL names the missing prerequisite; `warn` lines never block.
 - Job fails in `job-started`: see `~/.local-ci-runner/logs/hooks.log` (repo/event/ref only; no environment is logged). "not registered" means the protected config is missing.
 - `refused: ... allow-list config`: the config must be a regular 0600 file in a 0700 directory you own, with a valid checksum. Re-register instead of editing it.
+- `doctor`/`start`: "installed runner version X != pinned Y" means the runner and `runner-pin.json` disagree - fix the pin through review or reinstall; never edit around it.
 - Host-key errors: never bypass; fingerprint `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`.
