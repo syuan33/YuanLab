@@ -33,5 +33,10 @@ def bootout_cmd(uid: int) -> list:
     return ["launchctl", "bootout", f"gui/{uid}/{LABEL}"]  # addresses exactly our label; kills nothing else
 
 
+def domain_cmd(uid: int) -> list:
+    """Read-only probe: exits non-zero when the user has no active GUI login session (no gui/<uid> domain)."""
+    return ["launchctl", "print", f"gui/{uid}"]
+
+
 def print_cmd(uid: int) -> list:
     return ["launchctl", "print", f"gui/{uid}/{LABEL}"]

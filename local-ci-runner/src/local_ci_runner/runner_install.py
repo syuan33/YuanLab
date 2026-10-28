@@ -239,7 +239,8 @@ class Installer:
 
     # ---- start / stop --------------------------------------------------
     def plan_start(self):
-        return [" ".join(launchd.bootstrap_cmd(self.uid, self.p.plist))]
+        return [" ".join(launchd.domain_cmd(self.uid)) + "   (read-only: the dedicated user must have an active GUI login session)",
+                " ".join(launchd.bootstrap_cmd(self.uid, self.p.plist))]
 
     def plan_stop(self):
         return [" ".join(launchd.bootout_cmd(self.uid))]
@@ -253,9 +254,13 @@ class Installer:
         if not (self.p.runner_dir / ".runner").exists():
             raise InstallError("runner is not registered (manual, admin-approved step); refusing to start")
         verify_installed_version(self.p.runner_dir, self.pin, self.version_probe)
+        if self.exec(launchd.domain_cmd(self.uid)):
+            raise InstallError(f"no active GUI login session for this user (launchctl domain gui/{self.uid} is unavailable): the dedicated "
+                               "user must be logged in to the macOS desktop for the LaunchAgent to load; log in as that user, then retry")
         rc = self.exec(launchd.bootstrap_cmd(self.uid, self.p.plist))
         if rc:
-            raise InstallError(f"launchctl bootstrap failed ({rc}); already started?")
+            raise InstallError(f"launchctl bootstrap failed (exit {rc}). Most likely the dedicated user is not logged in to an active GUI "
+                               f"session (gui/{self.uid} required), or the service is already loaded (`status`, `stop`)")
 
     def apply_stop(self):
         self._guard()

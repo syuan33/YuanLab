@@ -9,7 +9,10 @@ Run the runner in a **dedicated standard (non-admin) macOS user or a disposable 
 sessions, cloud-drive data or private credentials, other than the minimum repository-scoped runner credential and any read-only
 deploy keys (held as Actions secrets, written to `$RUNNER_TEMP` for one step). `doctor`, `register --apply` and `start` check:
 non-root, non-admin, absence of well-known personal-data paths (existence only, contents never read), and a human attestation.
-These checks are heuristics and cannot prove a machine is clean.
+These checks are heuristics and cannot prove a machine is clean. The system-created login keychain is intentionally excluded from the
+personal-data indicators (macOS creates it at the GUI login the LaunchAgent needs, so it is not evidence of anything) and is never read, listed or unlocked;
+that it holds no personal or unrelated credentials rests on the operator's attestation. The LaunchAgent also requires an active GUI session for the dedicated
+user, which keeps a logged-in desktop session on that account - another reason it must be dedicated.
 
 ## Threats and controls
 | # | Threat | Control | Residual risk |

@@ -356,6 +356,79 @@ class InstalledVersion(Base):
                 installed_version(self.paths.runner_dir)
 
 
+class ScriptedExec:
+    """Executor returning scripted exit codes keyed by the launchctl sub-command."""
+
+    def __init__(self, rcs):
+        self.rcs, self.calls = rcs, []
+
+    def __call__(self, argv, env=None, cwd=None):
+        self.calls.append(list(argv))
+        return self.rcs.get(argv[1], 0) if argv[0] == "launchctl" else 0
+
+
+class StartGuiSession(Base):
+    """LaunchAgents load into gui/<uid>: start must fail clearly when the dedicated user has no GUI login session."""
+
+    def setUp(self):
+        super().setUp()
+        self.inst().apply_install()
+        (self.paths.runner_dir / ".runner").write_text("{}")
+
+    def inst_with(self, exe, **kw):
+        return Installer(self.paths, self.pin, exe, self.fetch, euid=1000, uid=501, version_probe=kw.pop("probe", lambda d: self.pin.version), **kw)
+
+    def test_no_gui_domain_is_diagnosed_before_bootstrap(self):
+        exe = ScriptedExec({"print": 113})
+        with self.assertRaises(InstallError) as c:
+            self.inst_with(exe).apply_start()
+        msg = str(c.exception)
+        self.assertIn("logged in", msg)
+        self.assertIn("gui/501", msg)
+        self.assertNotIn("bootstrap", [a[1] for a in exe.calls])
+
+    def test_bootstrap_failure_names_the_login_requirement(self):
+        exe = ScriptedExec({"bootstrap": 5})
+        with self.assertRaises(InstallError) as c:
+            self.inst_with(exe).apply_start()
+        self.assertIn("logged in", str(c.exception))
+        self.assertIn("exit 5", str(c.exception))
+        self.assertEqual([a[1] for a in exe.calls], ["print", "bootstrap"])
+
+    def test_success_path_and_plan(self):
+        exe = ScriptedExec({})
+        self.inst_with(exe).apply_start()
+        self.assertEqual([a[1] for a in exe.calls], ["print", "bootstrap"])
+        plan = " ".join(self.inst_with(exe).plan_start())
+        self.assertIn("gui/501", plan)
+        self.assertIn("GUI login session", plan)
+
+    def test_other_failures_are_not_weakened_or_reworded(self):
+        exe = ScriptedExec({"print": 113, "bootstrap": 5})  # session problems present too
+        # not registered
+        (self.paths.runner_dir / ".runner").unlink()
+        with self.assertRaises(InstallError) as c:
+            self.inst_with(exe).apply_start()
+        self.assertIn("not registered", str(c.exception))
+        (self.paths.runner_dir / ".runner").write_text("{}")
+        # version mismatch wins over (and precedes) any launchctl call
+        with self.assertRaises(InstallError) as c:
+            self.inst_with(exe, probe=lambda d: "1.0.0").apply_start()
+        self.assertIn("!=", str(c.exception))
+        # failing readiness gate
+        def gate():
+            raise InstallError("not ready - doctor failures: dedicated user")
+        with self.assertRaises(InstallError) as c:
+            self.inst_with(exe, gate=gate).apply_start()
+        self.assertIn("doctor failures", str(c.exception))
+        # not installed
+        self.paths.plist.unlink()
+        with self.assertRaises(InstallError) as c:
+            self.inst_with(exe).apply_start()
+        self.assertIn("not installed", str(c.exception))
+        self.assertEqual(exe.calls, [])  # none of those reached launchctl
+
+
 class StartRegisterVersionGate(Base):
     def setUp(self):
         super().setUp()

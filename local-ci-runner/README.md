@@ -28,11 +28,12 @@ environment. If the file is missing, a symlink, mis-permissioned, foreign-owned 
 The runner account must hold no personal SSH keys, browser sessions, cloud-drive data or private credentials beyond the
 repository-scoped runner credential and any read-only deploy keys. `doctor` fails (and `register --apply` / `start` refuse) when the
 user is root or admin, well-known personal-data paths exist (existence only; contents are never read), or `attest-dedicated-user --apply`
-has not been run on that account.
+has not been run on that account. The macOS login keychain (`~/Library/Keychains/login.keychain-db`) is created by the system at the account's first GUI login, which this tool requires, so an empty/system-created login keychain is **expected** and its existence is deliberately *not* treated as evidence of personal credentials. The tool never reads, lists, unlocks or inspects keychain contents; the operator attests (`attest-dedicated-user`) that it holds no personal or unrelated credentials.
 
 ## Install (on the dedicated account)
 ```
 git clone <this repository> && cd <repo>/local-ci-runner
+# first: log in to the dedicated user's macOS desktop (GUI session) - the LaunchAgent loads into gui/<uid>
 bin/local-ci-runner install --dry-run            # default; prints the plan
 bin/local-ci-runner attest-dedicated-user --apply
 bin/local-ci-runner install --apply              # pinned runner, ~/.local/bin launcher, hooks, LaunchAgent (not started)
@@ -41,6 +42,9 @@ local-ci-runner doctor                           # must print READY (exit 0)
 LOCAL_CI_RUNNER_TOKEN=... local-ci-runner register --apply --repo OWNER/REPO --i-have-admin-approval   # MANUAL GATE
 local-ci-runner start
 ```
+**`start` needs an active GUI login session for the dedicated user** (the LaunchAgent is loaded into `gui/<uid>`). If there is none, `start` fails with
+"the dedicated user must be logged in" instead of a bare launchctl error. Keep that session logged in (fast-user-switching away is fine; logging out stops the service).
+
 The manager is copied to `~/.local-ci-runner/app` and a launcher is written to `~/.local/bin/local-ci-runner`; workflows and hooks use
 it, not the source checkout. Uninstall removes the launcher only if it is byte-identical to the one in the manifest.
 

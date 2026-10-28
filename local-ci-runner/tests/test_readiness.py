@@ -149,6 +149,48 @@ class Doctor(TmpCase):
         self.assertEqual(exit_code(c), 0)
         self.assertFalse(any(x.name == "runner version" for x in c))
 
+    def test_system_created_login_keychain_is_not_a_personal_data_indicator(self):
+        from local_ci_runner.config import PERSONAL_DATA_PATHS
+        self.assertFalse(any("keychain" in p.lower() for p in PERSONAL_DATA_PATHS))
+        kc = self.home / "Library" / "Keychains" / "login.keychain-db"
+        kc.parent.mkdir(parents=True)
+        kc.write_bytes(b"\0opaque-system-created-keychain")  # never opened by the tool
+        queried = []
+        real_exists = self.kw["exists"]
+        c = self.checks(exists=lambda p: queried.append(p) or real_exists(p))
+        self.assertEqual(self.failed(c), set(), [x for x in c if x.level == "fail"])
+        self.assertEqual(exit_code(c), 0)
+        self.assertTrue(queried)  # the personal-data probes did run ...
+        self.assertFalse(any("Keychains" in p or "keychain" in p.lower() for p in queried))  # ... but never touched the keychain
+
+    def test_login_keychain_does_not_mask_real_personal_data(self):
+        kc = self.home / "Library" / "Keychains" / "login.keychain-db"
+        kc.parent.mkdir(parents=True)
+        kc.write_bytes(b"x")
+        self.assertEqual(exit_code(self.checks()), 0)
+        (self.home / ".aws").mkdir()
+        self.assertNotReady(self.checks(), "no personal data")
+
+    def test_every_listed_personal_data_indicator_still_fails(self):
+        from local_ci_runner.config import PERSONAL_DATA_PATHS
+        for rel in PERSONAL_DATA_PATHS:
+            target = self.home / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if rel.startswith(".ssh/id_") or rel.endswith((".netrc", "config.json")):
+                target.write_text("x")
+            else:
+                target.mkdir()
+            self.assertNotReady(self.checks(), "no personal data")
+            shutil.rmtree(target) if target.is_dir() else target.unlink()
+            self.assertEqual(exit_code(self.checks()), 0, rel)
+
+    def test_attestation_is_still_required_with_a_normal_keychain(self):
+        kc = self.home / "Library" / "Keychains" / "login.keychain-db"
+        kc.parent.mkdir(parents=True)
+        kc.write_bytes(b"x")
+        self.paths.attest.unlink()
+        self.assertNotReady(self.checks(), "attestation")
+
     def test_state_and_known_hosts(self):
         os.chmod(self.paths.home, 0o755)
         self.assertNotReady(self.checks(), "state dir mode")
