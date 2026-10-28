@@ -25,14 +25,17 @@ class Hooks(TmpCase):
 
     _n = 0
 
-    def event(self, head=R, base=R, fork=False):
+    def event(self, head=R, base=R, fork=False, base_ref="main"):
         Hooks._n += 1
         p = self.tmp / f"event{Hooks._n}.json"
-        p.write_text(json.dumps({"pull_request": {"head": {"repo": {"full_name": head, "fork": fork}}, "base": {"repo": {"full_name": base}}}}))
+        b = {"repo": {"full_name": base}}
+        if base_ref is not None:
+            b["ref"] = base_ref
+        p.write_text(json.dumps({"pull_request": {"head": {"repo": {"full_name": head, "fork": fork}}, "base": b}}))
         return str(p)
 
     def env(self, **kw):
-        e = {"GITHUB_REPOSITORY": R, "GITHUB_SHA": SHA, "GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/5/merge",
+        e = {"GITHUB_REPOSITORY": R, "GITHUB_SHA": SHA, "GITHUB_EVENT_NAME": "pull_request", "GITHUB_REF": "refs/pull/5/merge", "GITHUB_BASE_REF": "main",
              "GITHUB_EVENT_PATH": self.event(), "GITHUB_WORKSPACE": str(self.ws), "RUNNER_TEMP": str(self.rt)}
         e.update(kw)
         return e
@@ -65,6 +68,30 @@ class Hooks(TmpCase):
         for e in cases:
             with self.assertRaises(safety.SafetyError, msg=str(e)):
                 self.started(e)
+
+    def test_base_branch_and_integration_ref_guards(self):
+        cases = [
+            self.env(GITHUB_EVENT_PATH=self.event(base_ref="develop"), GITHUB_BASE_REF="develop"),
+            self.env(GITHUB_EVENT_PATH=self.event(base_ref="Main")),
+            self.env(GITHUB_EVENT_PATH=self.event(base_ref=None)),
+            self.env(GITHUB_EVENT_PATH=self.event(base_ref="")),
+            self.env(GITHUB_EVENT_PATH=self.event(base_ref=None), GITHUB_BASE_REF=""),
+            self.env(GITHUB_BASE_REF="develop"),
+            self.env(GITHUB_BASE_REF=""),
+            self.env(GITHUB_EVENT_PATH=self.event(base_ref="develop")),
+        ]
+        for ref in ("refs/pull/0/merge", "refs/pull/05/merge", "refs/pull/-1/merge", "refs/pull//merge", "refs/pull/x/merge",
+                    "refs/pull/5/merge/", "refs/pull/5/merge\n", "refs/pull/5/x/merge", "refs/pull/5/../6/merge", "refs/pull/5/merge/extra",
+                    "xrefs/pull/5/merge", " refs/pull/5/merge", "refs/pull/5/head", "refs/pull/5/MERGE", "refs/pull/\u0665/merge"):
+            cases.append(self.env(GITHUB_REF=ref))
+        for e in cases:
+            with self.assertRaises(safety.SafetyError, msg=str(e)):
+                self.started(e)
+        e = self.env()
+        del e["GITHUB_BASE_REF"]
+        with self.assertRaises(safety.SafetyError):
+            self.started(e)
+        self.started(self.env(GITHUB_REF="refs/pull/123456/merge"))
 
     def test_root_refused_and_unmanaged_workdir_refused(self):
         with self.assertRaises(safety.SafetyError):

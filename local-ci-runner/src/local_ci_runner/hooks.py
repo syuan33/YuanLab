@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from . import allowlist, safety
 from .config import SUPPORTED_EVENTS, Paths
 from .redact import Redactor
 
+PR_MERGE_REF = re.compile(r"refs/pull/[1-9][0-9]*/merge")
+PROTECTED_BASE = "main"
 SECRET_NAMES = ("deploy_key", "ssh_config", "gitconfig", "known_hosts", "github_host.pub")
 
 
@@ -48,7 +51,7 @@ def job_started(env, paths: Paths, euid=None) -> None:
         if ref not in cfg.push_refs:
             raise safety.SafetyError(f"push to {ref!r} is not allowed")
     else:
-        if not (ref.startswith("refs/pull/") and ref.endswith("/merge")):
+        if not PR_MERGE_REF.fullmatch(ref):
             raise safety.SafetyError(f"pull_request job is not on a GitHub integration ref: {ref!r}")
         try:
             ep = Path(env["GITHUB_EVENT_PATH"])
@@ -57,6 +60,9 @@ def job_started(env, paths: Paths, euid=None) -> None:
             pr = json.loads(ep.read_text())["pull_request"]
             head, base = pr["head"]["repo"], pr["base"]["repo"]
             ok = head["full_name"] == base["full_name"] == repo and head.get("fork") is False
+            base_ref = pr["base"]["ref"]
+            if base_ref != PROTECTED_BASE or env.get("GITHUB_BASE_REF") != PROTECTED_BASE:
+                raise safety.SafetyError(f"pull request base must be {PROTECTED_BASE!r} (payload {base_ref!r}, GITHUB_BASE_REF {env.get('GITHUB_BASE_REF')!r})")
         except (KeyError, TypeError, ValueError, OSError):
             ok = False
         if not ok:
