@@ -135,9 +135,10 @@ def default_executor(argv, env=None, cwd=None) -> int:
 
 class Installer:
     def __init__(self, paths: Paths, pin: Pin, executor=default_executor, fetch=default_fetch, euid=None, uid=None, gate=None,
-                 version_probe=installed_version):
+                 version_probe=installed_version, pin_file=None):
         self.p, self.pin, self.exec, self.fetch, self.gate = paths, pin, executor, fetch, gate  # gate: callable raising if not ready
         self.version_probe = version_probe
+        self.pin_file = pin_file  # the reviewed source runner-pin.json that is copied into the managed application
         self.euid, self.uid = euid, uid if uid is not None else os.getuid()
 
     def _guard(self):
@@ -151,6 +152,7 @@ class Installer:
             f"download {pin.url}",
             f"verify SHA-256 == {pin.sha256 or '<NOT PINNED - apply will refuse>'}",
             f"extract (validated, no links outside) into {self.p.runner_dir} and write ownership marker",
+            f"copy the exact reviewed runner-pin.json into {self.p.pin_file} (read-only) and record its SHA-256 in {self.p.manifest}",
             f"copy the manager into {self.p.app_dir} and write launcher {self.p.launcher} (user-owned PATH location; no source checkout needed)",
             f"create managed runner work dir {self.p.work_dir} (ownership marker) and runner hooks in {self.p.hooks_dir}",
             f"write {self.p.runner_dir}/.env (job hooks + PATH)",
@@ -158,10 +160,30 @@ class Installer:
             "NOT done: register runner, start service, change GitHub settings",
         ]
 
+    def _pin_payload(self) -> bytes:
+        """The exact reviewed pin file, refused unless it is a regular file that loads and equals the Pin used for the download."""
+        f = Path(self.pin_file) if self.pin_file else None
+        if f is None or f.is_symlink() or not f.is_file():
+            raise InstallError("source runner-pin.json is missing or a symlink; refusing to install")
+        try:
+            raw = f.read_bytes()
+            if len(raw) > 65536:
+                raise ValueError("too large")
+            loaded = Pin.load(f)
+        except InstallError:
+            raise
+        except Exception as e:  # noqa: BLE001 - any malformed pin is fatal
+            raise InstallError(f"source runner-pin.json is malformed: {e}")
+        mine = (self.pin.version, self.pin.asset, self.pin.url, self.pin.sha256)
+        if (loaded.version, loaded.asset, loaded.url, loaded.sha256) != mine:
+            raise InstallError("source runner-pin.json differs from the pin used for this installation; refusing")
+        return raw
+
     def apply_install(self):
         self._guard()
         if not self.pin.pinned:
             raise InstallError("runner SHA-256 is not pinned in runner-pin.json; refusing to install")
+        pin_bytes = self._pin_payload()  # validated before any side effect
         if self.p.runner_dir.exists():
             raise InstallError(f"{self.p.runner_dir} already exists; run uninstall first (upgrade = uninstall + install)")
         self.p.home.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -178,7 +200,7 @@ class Installer:
             if tmp.exists():
                 shutil.rmtree(tmp, ignore_errors=True)
         safety.write_marker(self.p.runner_dir)
-        selfinstall.install_app(self.p, Path(__file__).resolve().parent, __version__)
+        selfinstall.install_app(self.p, Path(__file__).resolve().parent, __version__, pin_bytes)
         os.mkdir(self.p.work_dir, 0o700)
         safety.write_marker(self.p.work_dir)
         env_lines = [f"ACTIONS_RUNNER_HOOK_JOB_STARTED={self.p.hooks_dir / 'job-started.sh'}",

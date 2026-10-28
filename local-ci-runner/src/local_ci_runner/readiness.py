@@ -56,7 +56,7 @@ class Ctx:
                    sys.version_info[:2], shutil.which, tv, lambda p: os.path.lexists(p))
 
 
-def run_checks(ctx: Ctx, paths: Paths, pin_file: Path, workflow: Path = None):
+def run_checks(ctx: Ctx, paths: Paths, pin_file: Path, workflow: Path = None, pin_error: str = None):
     out = []
     add = lambda level, name, detail: out.append(Check(level, name, detail))
 
@@ -83,6 +83,8 @@ def run_checks(ctx: Ctx, paths: Paths, pin_file: Path, workflow: Path = None):
 
     pin = None
     try:
+        if pin_error:
+            raise InstallError(pin_error)
         pin = Pin.load(pin_file)
         add("ok" if pin.pinned else "fail", "runner pin", f"v{pin.version} sha256 " + ("populated" if pin.pinned else "NOT populated"))
     except Exception as e:  # noqa: BLE001

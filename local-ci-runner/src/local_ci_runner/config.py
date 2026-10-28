@@ -12,12 +12,13 @@ MIN_PYTHON = (3, 9)  # Apple's Command Line Tools python3 is 3.9.x; verified on 
 MIN_GIT = (2, 32)  # GIT_CONFIG_GLOBAL support
 REQUIRED_TOOLS = ("git", "ssh", "ssh-keyscan", "ssh-keygen", "curl", "unzip", "shasum", "awk", "tr")
 # Existence-only checks (contents are never read). Presence means the account is not a dedicated CI account.
-# Deliberately NOT listed: Library/Keychains/login.keychain-db. macOS creates an (empty) login keychain at first GUI login, and this
+# Deliberately NOT listed: Library/Safari and Library/Cookies - macOS creates them automatically at the first GUI login (observed on a fresh
+# dedicated account), so their existence proves nothing; they are never opened, listed or read. Also not listed: Library/Keychains/login.keychain-db. macOS creates an (empty) login keychain at first GUI login, and this
 # tool requires that login, so its mere existence proves nothing. It is never opened, listed or unlocked; the operator attests it holds
 # no personal or unrelated credentials (see `attest-dedicated-user`).
 PERSONAL_DATA_PATHS = (
     ".ssh/id_rsa", ".ssh/id_ed25519", ".ssh/id_ecdsa", ".ssh/id_dsa", ".aws", ".config/gcloud", ".config/gh", ".netrc",
-    ".docker/config.json", ".kube", "Library/Mobile Documents", "Library/Safari", "Library/Cookies",
+    ".docker/config.json", ".kube", "Library/Mobile Documents",
     "Library/Application Support/Google/Chrome", "Library/Application Support/Firefox",
     "Dropbox", "Google Drive", "OneDrive", "Library/CloudStorage",
 )
@@ -55,3 +56,4 @@ class Paths:
     attest = property(lambda s: s.home / "dedicated-user.attest")
     launcher = property(lambda s: s.bin_dir / "local-ci-runner")
     config_file = property(lambda s: s.home / "config.json")
+    pin_file = property(lambda s: s.home / "app" / "runner-pin.json")  # part of the immutable managed application payload

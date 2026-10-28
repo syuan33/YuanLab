@@ -27,8 +27,8 @@ environment. If the file is missing, a symlink, mis-permissioned, foreign-owned 
 ## Dedicated account precondition
 The runner account must hold no personal SSH keys, browser sessions, cloud-drive data or private credentials beyond the
 repository-scoped runner credential and any read-only deploy keys. `doctor` fails (and `register --apply` / `start` refuse) when the
-user is root or admin, well-known personal-data paths exist (existence only; contents are never read), or `attest-dedicated-user --apply`
-has not been run on that account. The macOS login keychain (`~/Library/Keychains/login.keychain-db`) is created by the system at the account's first GUI login, which this tool requires, so an empty/system-created login keychain is **expected** and its existence is deliberately *not* treated as evidence of personal credentials. The tool never reads, lists, unlocks or inspects keychain contents; the operator attests (`attest-dedicated-user`) that it holds no personal or unrelated credentials.
+user is root or admin, well-known strong personal-data indicators exist (personal SSH private keys, `~/.aws`, gcloud/gh/Docker/kube credentials, `~/.netrc`, Chrome/Firefox user profiles, iCloud/Mobile Documents and cloud-drive folders; existence only, contents are never read), or `attest-dedicated-user --apply`
+has not been run on that account. macOS creates `~/Library/Safari`, `~/Library/Cookies` and the login keychain by itself at the first GUI login (which this tool requires), so the existence of those system-created locations is deliberately *not* treated as evidence of personal data; they are never opened, listed or read, and the operator attests (`attest-dedicated-user`) that the account has no personal browser session, cookies or credentials. The macOS login keychain (`~/Library/Keychains/login.keychain-db`) is created by the system at the account's first GUI login, which this tool requires, so an empty/system-created login keychain is **expected** and its existence is deliberately *not* treated as evidence of personal credentials. The tool never reads, lists, unlocks or inspects keychain contents; the operator attests (`attest-dedicated-user`) that it holds no personal or unrelated credentials.
 
 ## Install (on the dedicated account)
 ```
@@ -45,8 +45,12 @@ local-ci-runner start
 **`start` needs an active GUI login session for the dedicated user** (the LaunchAgent is loaded into `gui/<uid>`). If there is none, `start` fails with
 "the dedicated user must be logged in" instead of a bare launchctl error. Keep that session logged in (fast-user-switching away is fine; logging out stops the service).
 
-The manager is copied to `~/.local-ci-runner/app` and a launcher is written to `~/.local/bin/local-ci-runner`; workflows and hooks use
-it, not the source checkout. Uninstall removes the launcher only if it is byte-identical to the one in the manifest.
+The manager **and the exact reviewed `runner-pin.json`** are copied to `~/.local-ci-runner/app` (the pin read-only, its SHA-256 recorded in
+`~/.local-ci-runner/manifest.json`), and a launcher is written to `~/.local/bin/local-ci-runner`; workflows and hooks use
+it, not the source checkout. The installed CLI (launcher, `doctor`, `register`, `start`, `verify-pin`) uses **only** that installed pin and verifies it against the manifest on every
+run - a missing, symlinked, modified or mismatched pin is a hard failure, and there is no fallback to a source checkout or any other path - so the source checkout can be
+deleted after installing. `install --apply` refuses (before any side effect) if the source pin is missing, a symlink, malformed or different from the pin used for the download.
+Uninstall removes the pin only as part of the ownership-checked app removal. Uninstall removes the launcher only if it is byte-identical to the one in the manifest.
 
 Runner pin: `runner-pin.json` = v2.338.2, SHA-256 `25a065af…19a388`. Versions are never chosen at runtime; `verify-pin` (also a CI job) fails
 if the pin stops matching official release metadata.

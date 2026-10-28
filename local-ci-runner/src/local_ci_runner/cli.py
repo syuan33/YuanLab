@@ -12,13 +12,14 @@ import threading
 import time
 from pathlib import Path
 
-from . import allowlist, gitops, hooks, launchd, pincheck, readiness, report, safety
+from . import allowlist, gitops, hooks, launchd, pincheck, readiness, report, safety, selfinstall
 from .config import CACHE_PATHS, DEFAULT_TIMEOUT, Paths
 from .engine import Engine
 from .queue import JobQueue
 from .runner_install import InstallError, Installer, Pin
 
-PIN_FILE = Path(__file__).resolve().parents[2] / "runner-pin.json"
+MODULE_FILE = __file__
+PIN_FILE = Path(__file__).resolve().parents[2] / "runner-pin.json"  # source-checkout pin; a managed install never uses it
 EXIT = {"passed": 0, "failed": 1, "error": 2, "timeout": 124, "cancelled": 130, "superseded": 75, "busy": 75, "duplicate": 75}
 
 
@@ -34,7 +35,8 @@ def _add_mode(sp, default_note="default"):
 
 
 def _installer(paths):
-    return Installer(paths, Pin.load(PIN_FILE), gate=_gate(paths))
+    pin_file = _pin_or_raise(paths)
+    return Installer(paths, Pin.load(pin_file), gate=_gate(paths), pin_file=pin_file)
 
 
 def _plan(title, lines):
@@ -43,15 +45,29 @@ def _plan(title, lines):
         print(f"  - {l}")
 
 
+def _pin(paths):
+    """(pin_file, error): the installed pin when running from the managed install, else the source checkout's own."""
+    return selfinstall.resolve_pin(paths, MODULE_FILE, PIN_FILE)
+
+
+def _pin_or_raise(paths):
+    pin_file, err = _pin(paths)
+    if err:
+        raise InstallError(err)
+    return pin_file
+
+
 def cmd_doctor(a, paths):
-    checks = readiness.run_checks(readiness.Ctx.real(), paths, PIN_FILE, Path(a.workflow) if a.workflow else None)
+    pin_file, pin_err = _pin(paths)
+    checks = readiness.run_checks(readiness.Ctx.real(), paths, pin_file, Path(a.workflow) if a.workflow else None, pin_err)
     print(readiness.render(checks))
     return readiness.exit_code(checks)
 
 
 def _gate(paths):
     def gate():
-        bad = [c for c in readiness.run_checks(readiness.Ctx.real(), paths, PIN_FILE) if c.level == "fail"]
+        pin_file, pin_err = _pin(paths)
+        bad = [c for c in readiness.run_checks(readiness.Ctx.real(), paths, pin_file, None, pin_err) if c.level == "fail"]
         if bad:
             raise InstallError("not ready - doctor failures: " + "; ".join(f"{c.name}: {c.detail}" for c in bad))
     return gate
@@ -108,7 +124,7 @@ def cmd_clean(a, paths):
 
 
 def cmd_verify_pin(a, paths):
-    problems, notes = pincheck.check_pin(Pin.load(PIN_FILE))
+    problems, notes = pincheck.check_pin(Pin.load(_pin_or_raise(paths)))
     for n in notes:
         print(f"note: {n}")
     for p in problems:

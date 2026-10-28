@@ -13,6 +13,7 @@ from .config import Paths
 
 LAUNCHER_HEADER = "# local-ci-runner managed launcher: removed only by `local-ci-runner uninstall --apply`\n"
 PROPOSED_WORKFLOW = "example-workflow.yml"
+PIN_NAME = "runner-pin.json"
 
 
 def _launcher_text(app_pkg: Path) -> str:
@@ -50,7 +51,8 @@ def launcher_is_ours(paths: Paths) -> bool:
         return False
 
 
-def install_app(paths: Paths, pkg_dir: Path, version: str) -> None:
+def install_app(paths: Paths, pkg_dir: Path, version: str, pin_bytes: bytes) -> None:
+    """`pin_bytes` is the exact, already validated runner-pin.json; it is installed next to the code and hashed into the manifest."""
     if paths.app_dir.exists():
         raise safety.SafetyError(f"{paths.app_dir} already exists; uninstall first")
     if paths.launcher.exists() or paths.launcher.is_symlink():
@@ -64,6 +66,8 @@ def install_app(paths: Paths, pkg_dir: Path, version: str) -> None:
         pkg.mkdir(parents=True, mode=0o700)
         for f in sorted(Path(pkg_dir).glob("*.py")):
             shutil.copyfile(f, pkg / f.name)
+        (tmp / PIN_NAME).write_bytes(pin_bytes)
+        os.chmod(tmp / PIN_NAME, 0o444)
         ex = find_example(paths)
         if ex:
             (tmp / "examples").mkdir()
@@ -84,7 +88,8 @@ def install_app(paths: Paths, pkg_dir: Path, version: str) -> None:
     tmpl.chmod(0o755)
     os.replace(tmpl, paths.launcher)
     paths.manifest.write_text(json.dumps({"version": version, "launcher": str(paths.launcher), "launcher_sha256": _sha(text),
-                                          "app_dir": str(paths.app_dir)}))
+                                          "app_dir": str(paths.app_dir), "pin_file": str(paths.pin_file),
+                                          "pin_sha256": hashlib.sha256(pin_bytes).hexdigest()}))
 
 
 def check_app_removable(paths: Paths) -> None:
@@ -106,3 +111,40 @@ def uninstall_app(paths: Paths) -> list:
     if paths.manifest.exists() and not paths.manifest.is_symlink():
         paths.manifest.unlink()
     return notes
+
+
+def verify_installed_pin(paths: Paths, pin_path: Path) -> None:
+    """Fail closed unless `pin_path` is exactly the pin this installation recorded: inside the marker-owned app dir, a regular
+    non-symlink file whose SHA-256 equals the manifest's."""
+    pin_path = Path(pin_path)
+    if pin_path.resolve() != paths.pin_file.resolve() or pin_path.parent.resolve() != paths.app_dir.resolve():
+        raise safety.SafetyError(f"installed application at {pin_path.parent} does not belong to state directory {paths.home}")
+    if not safety.is_owned(paths.app_dir, paths.home):
+        raise safety.SafetyError(f"{paths.app_dir} lacks a valid ownership marker")
+    try:
+        m = json.loads(paths.manifest.read_text())
+        want, recorded = m["pin_sha256"], m["pin_file"]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise safety.SafetyError(f"install manifest {paths.manifest} is missing or lacks the pin SHA-256")
+    if recorded != str(paths.pin_file):
+        raise safety.SafetyError("install manifest records a different pin path")
+    if pin_path.is_symlink() or not pin_path.is_file():
+        raise safety.SafetyError(f"installed pin {pin_path} is missing or not a regular file")
+    got = hashlib.sha256(pin_path.read_bytes()).hexdigest()
+    if got != want:
+        raise safety.SafetyError(f"installed pin {pin_path} was modified (SHA-256 {got[:12]}... != manifest {want[:12]}...)")
+
+
+def resolve_pin(paths: Paths, module_file, source_pin: Path):
+    """Which runner-pin.json does this CLI use? -> (path, error).
+    Managed install (code under <home>/app/pkg): ONLY the installed pin, verified against the manifest; never the source checkout or any
+    ambient path. Source checkout (development / the install step itself): its own runner-pin.json."""
+    mf = Path(module_file).resolve()
+    if len(mf.parents) > 2 and mf.parents[1].name == "pkg" and mf.parents[2].name == "app":
+        pin = mf.parents[2] / PIN_NAME
+        try:
+            verify_installed_pin(paths, pin)
+        except safety.SafetyError as e:
+            return pin, str(e)
+        return pin, None
+    return Path(source_pin), None

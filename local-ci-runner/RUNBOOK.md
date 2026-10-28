@@ -8,7 +8,7 @@ Nothing here has been executed against a real runner or repository. Steps touchi
 
 ## One-time setup (dedicated standard macOS user or disposable VM - mandatory)
 Log in to the dedicated user's macOS desktop first and keep that GUI session active: the LaunchAgent loads into `gui/<uid>`, and `start` fails
-with "the dedicated user must be logged in" otherwise. The empty login keychain macOS creates at that first login is expected; it is never read
+with "the dedicated user must be logged in" otherwise. The empty login keychain and the `~/Library/Safari` / `~/Library/Cookies` directories macOS creates at that first login are expected; they are never read
 or counted as personal data. Attest (below) that it holds no personal or unrelated credentials.
 ```
 local-ci-runner install --dry-run
@@ -53,6 +53,7 @@ release exists). If jobs stop being assigned, compare the runner version with th
 - `doctor` NOT READY: each FAIL names the missing prerequisite; `warn` lines never block.
 - Job fails in `job-started`: see `~/.local-ci-runner/logs/hooks.log` (repo/event/ref only; no environment is logged). "not registered" means the protected config is missing.
 - `refused: ... allow-list config`: the config must be a regular 0600 file in a 0700 directory you own, with a valid checksum. Re-register instead of editing it.
+- `doctor`: "[FAIL] runner pin ... installed pin ... modified/missing/does not belong" - the managed pin no longer matches the install manifest. Do not edit it: `stop`, `uninstall --apply`, then `install --apply` again from the reviewed checkout.
 - `start`: "no active GUI login session ... the dedicated user must be logged in" - log in to that user's desktop (or fast-user-switch to it), then retry. "launchctl bootstrap failed" has the same most-likely cause, or the service is already loaded (`status`, `stop`).
 - `doctor`/`start`: "installed runner version X != pinned Y" means the runner and `runner-pin.json` disagree - fix the pin through review or reinstall; never edit around it.
 - Host-key errors: never bypass; fingerprint `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`.

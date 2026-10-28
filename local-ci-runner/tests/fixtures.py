@@ -11,6 +11,7 @@ import warnings
 from pathlib import Path
 
 SYNTH_REPO = "example-org/example-repo"  # synthetic name only; the remote is always a local bare repo
+REAL_PIN_BYTES = (Path(__file__).resolve().parents[1] / "runner-pin.json").read_bytes()
 SYNTH_COMMAND = ["ci/verify.sh", "--out", "{results_dir}"]
 
 

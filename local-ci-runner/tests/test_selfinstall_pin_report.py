@@ -6,7 +6,7 @@ from pathlib import Path
 from local_ci_runner import pincheck, report, safety, selfinstall
 from local_ci_runner.config import Paths
 from local_ci_runner.runner_install import Pin
-from tests.fixtures import TmpCase
+from tests.fixtures import REAL_PIN_BYTES, TmpCase
 
 ROOT = Path(__file__).resolve().parents[1]
 PKG = ROOT / "src" / "local_ci_runner"
@@ -19,7 +19,7 @@ class SelfInstall(TmpCase):
         self.p.home.mkdir(mode=0o700)
 
     def test_launcher_runs_without_source_checkout(self):
-        selfinstall.install_app(self.p, PKG, "t")
+        selfinstall.install_app(self.p, PKG, "t", REAL_PIN_BYTES)
         env = {"PATH": os.environ["PATH"], "HOME": str(self.tmp), "LOCAL_CI_RUNNER_HOME": str(self.tmp / "h2")}
         r = subprocess.run([str(self.p.launcher), "--help"], cwd=self.tmp, env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -29,13 +29,13 @@ class SelfInstall(TmpCase):
         self.assertTrue(os.access(self.p.hooks_dir / "job-started.sh", os.X_OK))
 
     def test_uninstall_ownership(self):
-        selfinstall.install_app(self.p, PKG, "t")
+        selfinstall.install_app(self.p, PKG, "t", REAL_PIN_BYTES)
         self.assertTrue(selfinstall.launcher_is_ours(self.p))
         self.assertEqual(selfinstall.uninstall_app(self.p), [])
         self.assertFalse(self.p.launcher.exists() or self.p.app_dir.exists())
 
     def test_symlinked_launcher_not_removed(self):
-        selfinstall.install_app(self.p, PKG, "t")
+        selfinstall.install_app(self.p, PKG, "t", REAL_PIN_BYTES)
         real = self.p.bin_dir / "real"
         real.write_bytes(self.p.launcher.read_bytes())
         self.p.launcher.unlink()
@@ -45,7 +45,7 @@ class SelfInstall(TmpCase):
         self.assertTrue(notes)
 
     def test_unmarked_app_dir_refused(self):
-        selfinstall.install_app(self.p, PKG, "t")
+        selfinstall.install_app(self.p, PKG, "t", REAL_PIN_BYTES)
         (self.p.app_dir / safety.MARKER).unlink()
         with self.assertRaises(safety.SafetyError):
             selfinstall.uninstall_app(self.p)

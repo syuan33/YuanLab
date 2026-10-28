@@ -43,13 +43,16 @@ class Base(TmpCase):
         self.tar = self.tmp / "r.tar.gz"
         make_tarball(self.tar, {"run.sh": b"#!/bin/sh\n", "config.sh": b"#!/bin/sh\n"})
         self.sha = hashlib.sha256(self.tar.read_bytes()).hexdigest()
-        self.pin = Pin("9.9.9", "actions-runner-osx-arm64-9.9.9.tar.gz", "https://example.invalid/r.tar.gz", self.sha)
+        self.pin = Pin("9.9.9", "actions-runner-osx-arm64-9.9.9.tar.gz",
+                       "https://github.com/actions/runner/releases/download/v9.9.9/actions-runner-osx-arm64-9.9.9.tar.gz", self.sha)
+        self.pin_src = self.tmp / "source-pin.json"
+        self.pin_src.write_text(json.dumps({"version": "9.9.9", "asset": self.pin.asset, "url": self.pin.url, "sha256": self.sha}))
         self.fetch = lambda url, dest: dest.write_bytes(self.tar.read_bytes())
         self.rec = Recorder()
 
     def inst(self, pin=None, euid=1000, gate=None, probe=None):
         return Installer(self.paths, pin or self.pin, self.rec, self.fetch, euid=euid, gate=gate,
-                         version_probe=probe or (lambda d: (pin or self.pin).version))
+                         version_probe=probe or (lambda d: (pin or self.pin).version), pin_file=self.pin_src)
 
 
 class Download(Base):

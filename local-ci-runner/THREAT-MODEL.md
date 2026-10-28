@@ -9,9 +9,9 @@ Run the runner in a **dedicated standard (non-admin) macOS user or a disposable 
 sessions, cloud-drive data or private credentials, other than the minimum repository-scoped runner credential and any read-only
 deploy keys (held as Actions secrets, written to `$RUNNER_TEMP` for one step). `doctor`, `register --apply` and `start` check:
 non-root, non-admin, absence of well-known personal-data paths (existence only, contents never read), and a human attestation.
-These checks are heuristics and cannot prove a machine is clean. The system-created login keychain is intentionally excluded from the
-personal-data indicators (macOS creates it at the GUI login the LaunchAgent needs, so it is not evidence of anything) and is never read, listed or unlocked;
-that it holds no personal or unrelated credentials rests on the operator's attestation. The LaunchAgent also requires an active GUI session for the dedicated
+These checks are heuristics and cannot prove a machine is clean. The system-created login keychain, `Library/Safari` and `Library/Cookies` are intentionally excluded from the
+personal-data indicators (macOS creates them at the GUI login the LaunchAgent needs, so they are not evidence of anything); they are never read, listed or unlocked.
+That the account has no personal browser session, cookies or unrelated credentials rests on the operator's attestation. The LaunchAgent also requires an active GUI session for the dedicated
 user, which keeps a logged-in desktop session on that account - another reason it must be dedicated.
 
 ## Threats and controls
@@ -24,6 +24,7 @@ user, which keeps a logged-in desktop session on that account - another reason i
 | 5 | Persistent state poisoning (work dir, tool caches, `~/.npm`, `~/.m2`, ...) | `job-completed` empties the checkout and credential-shaped files; `clean --apply`; fresh checkout per job | user-level caches persist; purge by hand or rebuild the VM |
 | 6 | Secret leakage | per-step `$RUNNER_TEMP` directory with `trap` cleanup + hook cleanup; env allow-list for the standalone `run`; log/report redaction | redaction is pattern-based; repo code can read the account |
 | 7 | Registration token exposure | child env only (`ACTIONS_RUNNER_INPUT_TOKEN`), never argv/disk/logs; admin gate; token variable name is not an allow-list input | visible to same-user processes while `config.sh` runs; env mechanism unvalidated against a real runner |
+| 7b | Reviewed pin swapped after install | the exact reviewed `runner-pin.json` is part of the immutable managed payload (read-only, SHA-256 in the manifest); the installed CLI uses only that file and fails closed if it is missing, a symlink, modified or mismatched; no fallback to a source checkout | a same-user attacker can edit the file and the manifest together (consistency control, not a boundary) |
 | 8 | Tampered runner download, or a pinned runner replacing itself | pinned version + SHA-256, official-URL-prefix check, hash before extract, validated tar; **`--disableupdate` at registration** (no runtime self-update); `doctor`/`start`/`register` fail closed unless the installed runner's `--version` equals the pin | hash must be re-checked against official release notes (`verify-pin`); a same-user attacker could reconfigure or replace the runner (the version check is a consistency control, not a boundary); **stale-runner risk:** a non-updating runner left too far behind GitHub's latest release may be refused jobs (rule not verified here) - upgrade through the reviewed stop/uninstall/install/re-register path |
 | 9 | MITM / wrong host key | fail-closed Ed25519 fingerprint check (workflow example) and pinned known_hosts (standalone run) | key rotation needs a reviewed change |
 | 10 | Root / privilege | LaunchAgent, no `UserName`; every mutating command and hook refuses euid 0; non-admin required | - |
