@@ -13,7 +13,9 @@ wrapped by a small stdlib-only Python manager. Repository-neutral: every example
 
 > **Warning.** A self-hosted runner executes repository code on your machine; it is **not** a throw-away hosted VM. A
 > **dedicated standard macOS user or disposable VM is a mandatory production precondition.** Never attach it to a public
-> repository that accepts fork PRs. This tool has not been run against a real runner. Local results are not your required merge gate.
+> repository that accepts fork PRs. The runner installation and Python package/toolcache preseed have been exercised on a dedicated
+> non-admin Apple Silicon account; the complete restartable script has also passed its no-change dry-run. None of that makes a local
+> result a repository's required merge gate.
 
 Docs: [ADR 0001](docs/adr/0001-official-runner-vs-custom-poller.md) · [THREAT-MODEL.md](THREAT-MODEL.md) · [RUNBOOK.md](RUNBOOK.md)
 
@@ -51,6 +53,84 @@ it, not the source checkout. The installed CLI (launcher, `doctor`, `register`, 
 run - a missing, symlinked, modified or mismatched pin is a hard failure, and there is no fallback to a source checkout or any other path - so the source checkout can be
 deleted after installing. `install --apply` refuses (before any side effect) if the source pin is missing, a symlink, malformed or different from the pin used for the download.
 Uninstall removes the pin only as part of the ownership-checked app removal. Uninstall removes the launcher only if it is byte-identical to the one in the manifest.
+
+## Preseed the macOS language toolchain
+
+`actions/setup-node` and `actions/setup-java` can populate their user-writable caches without administrator privileges. The official
+macOS package used by `actions/setup-python`, however, invokes Apple's system installer the first time a Python version is absent.
+A non-interactive runner under a standard account cannot answer that administrator prompt, so a job may stop at `Set up Python` even
+after Node and Java succeeded.
+
+The included `scripts/preseed-macos-ci-toolchain.sh` handles that one host-level exception without making the runner account an
+administrator. Run it from a separate macOS administrator account while the runner is stopped:
+
+```bash
+# No persistent change: validates the account, runner state and pinned public assets.
+./scripts/preseed-macos-ci-toolchain.sh --ci-user <dedicated-ci-user>
+
+# Explicit human gate: prompts locally for the administrator password.
+./scripts/preseed-macos-ci-toolchain.sh --ci-user <dedicated-ci-user> --apply
+```
+
+The script pins and verifies the official Python `3.11.9-9947079978` Apple Silicon release, installs only the framework,
+applications/certificate helper and pip, and creates the exact setup-python cache entry under the managed runner work directory.
+It disables the package's shell-profile updater, `/usr/local/bin` compatibility shims and offline documentation. Only the Python 3.11
+framework is transferred to the dedicated account; the account remains non-admin and receives no sudo rule.
+
+Node 22 and Java 21 are verified when their caches already exist. On a fresh host, their absence is reported as deferred—not as a
+failure—because the pinned `setup-node` and `setup-java` workflow actions will populate them without privilege. clj-kondo is downloaded
+to a temporary directory, checksum-verified and executed once, then removed. ClojureScript/shadow-cljs remains a locked project
+dependency installed by `npm ci`; do not add a global Clojure or shadow-cljs installation just to make this preflight green.
+
+The operation is intentionally restartable. If Python installation succeeds but a later Node/Java/clj-kondo check fails, run the same
+`--apply` command again after correcting the check: the completed exact Python toolcache is verified and the package reinstall is
+skipped. Success ends with `TOOLCHAIN PRESEED PASSED`. The script never registers/starts the runner, creates a GitHub token, enables a
+workflow, or runs repository code.
+
+## Deployment topology: local operator versus a remote M1/Orca executor
+
+Running these commands yourself while logged in as the dedicated runner account is not the same deployment shape as asking an
+agent running in a worktree to deploy the runner. Keep these three boundaries separate:
+
+| Boundary | Example location | What belongs there |
+|---|---|---|
+| M1/orchestrator control plane | an operator account on `192.168.x.y` | a private SSH alias, its identity key and pinned `known_hosts`; optional private routing metadata |
+| repository worktree | an Orca/Git worktree | reviewed source, tests and non-secret evidence only |
+| dedicated runner account | a standard macOS account on the CI Mac | the installed manager, official runner, protected allow-list, LaunchAgent, work directory and reports |
+
+For a direct local install, the operator is already logged in as the dedicated runner account, so `install`, `doctor`, `register`
+and `start` all run in the same account. For an M1/Orca-controlled install, M1 normally runs as a different OS user and may be on a
+different Mac. It must first use its own Home-private SSH configuration to reach the dedicated runner account, then run the same
+commands remotely. The worktree is only the source/evidence plane; it is not a credential shuttle.
+
+For example, an orchestrator on `192.168.x.y` might have an SSH alias named `ci-runner-private` that resolves to a dedicated CI Mac.
+The literal alias, LAN address, local usernames, identity path and host key are operator-private values. They must not be committed,
+copied into a worktree, included in an Issue/PR/checkpoint, or inferred from another machine's alias. An alias is local to the OS user
+whose OpenSSH configuration defines it; an alias that works on an administrator's Mac need not exist in an Orca executor's Home.
+
+Some orchestrators keep only the alias name in a Home-private routing file, for example:
+
+```clojure
+{:ci-ssh-alias "ci-runner-private"}
+```
+
+That file is an **orchestration convention, not a `local-ci-runner` requirement**. If used, keep it outside the repository with mode
+0600 in a mode-0700 directory. Before requesting a registration token, the orchestrator should confirm, without printing private
+values: current executor Home, routing file readable, alias parsed, OpenSSH Host entry loaded, pinned-host-key BatchMode SSH succeeds.
+Any failure stops before token creation. Do not fix Home-access problems by copying, symlinking or bind-mounting `~/.ssh` or other
+private routing files into the worktree; instead repair the executor's host-level Home permissions/configuration.
+
+Non-interactive SSH shells often do not read the dedicated account's interactive shell profile, so `command -v local-ci-runner`
+may fail even after a correct managed install. This alone is not evidence that the installation is missing. The installer contract
+writes the stable launcher to `$HOME/.local/bin/local-ci-runner`; remote automation should invoke that launcher explicitly (or set the
+documented minimal PATH for that one remote command), then let `doctor` verify its manifest and installed manager. Do not search other
+accounts or guess additional installation directories. If the managed launcher itself is absent or non-executable, stop before token
+creation and return to the installation gate.
+
+A repository registration token is short-lived control-plane data. Generate it immediately before use and stream it to
+`register --token-stdin`; do not place it in argv, a file, chat, worktree, checkpoint or CI log. Public evidence should contain only
+repository-neutral outcomes such as exact source SHA, `doctor`/`status` result, runner online/idle state, required labels, workflow
+run ID and check conclusion.
 
 Runner pin: `runner-pin.json` = v2.338.2, SHA-256 `25a065af…19a388`. Versions are never chosen at runtime; `verify-pin` (also a CI job) fails
 if the pin stops matching official release metadata.
