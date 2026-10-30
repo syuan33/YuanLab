@@ -158,6 +158,7 @@ hook job-started|job-completed --home DIR  called by the runner, not by hand
 verify-pin                       compare runner-pin.json with official release metadata (network)
 run --repo OWNER/REPO --sha <40-hex>       STANDALONE exact-SHA verification (not the CI path)
 cancel --repo OWNER/REPO --sha <40-hex>
+logs --follow                    read-only: validated, sanitized stage events of the current job (logs/<run-id>/<job-id>/timeline.log); `status` shows the latest
 ```
 **`doctor` mandatory checks (any failure ⇒ exit 1):** Darwin/arm64; not root; non-admin; no personal-data paths + attestation;
 Python ≥ 3.9; `git ≥ 2.32`, `ssh`, `ssh-keyscan`, `ssh-keygen`, `curl`, `unzip`, `shasum`, `awk`, `tr`; runner SHA-256 populated; managed

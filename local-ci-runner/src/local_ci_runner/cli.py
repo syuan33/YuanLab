@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import allowlist, gitops, hooks, launchd, pincheck, readiness, report, safety, selfinstall
+from . import allowlist, gitops, hooks, launchd, pincheck, readiness, report, safety, selfinstall, timeline
 from .config import CACHE_PATHS, DEFAULT_TIMEOUT, Paths
 from .engine import Engine
 from .queue import JobQueue
@@ -205,7 +205,18 @@ def cmd_status(a, paths):
     print(f"queue       : {len(active)} active")
     for j in active:
         print(f"  {j['id']} {j['state']:8} {j['repo']}@{j['sha'][:12]} ref={j.get('ref')}")
+    for ln in timeline.status_lines(paths.logs):
+        print(ln)
     return 0
+
+
+def cmd_logs(a, paths):
+    try:
+        rc = timeline.follow(paths.logs, print)
+        sys.stdout.flush()
+        return rc
+    except KeyboardInterrupt:
+        return 130
 
 
 def cmd_run(a, paths):
@@ -257,6 +268,7 @@ def build_parser():
     for n in ("start", "stop"):
         sp = sub.add_parser(n, help=f"{n} the launchd service"); sp.add_argument("--dry-run", action="store_true")
     sub.add_parser("status", help="show state")
+    lg = sub.add_parser("logs", help="read-only sanitized progress events of the current CI job"); lg.add_argument("--follow", action="store_true", required=True)
     r = sub.add_parser("run", help="STANDALONE: run the registered verify command for an exact SHA in a fresh workspace")
     r.add_argument("--repo", required=True); g = r.add_mutually_exclusive_group()
     g.add_argument("--sha"); g.add_argument("--branch", help="owner branch, resolved once and pinned")
