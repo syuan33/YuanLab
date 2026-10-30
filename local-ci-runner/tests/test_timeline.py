@@ -190,6 +190,18 @@ class PathSafety(TimelineCase):
             with self.assertRaises(timeline.TimelineError, msg=(run, job)):
                 timeline.read_timeline(self.logs, run, job)
 
+    def test_job_id_length_boundary(self):
+        job64, job65 = "j" * 64, "j" * 65
+        self.write([rec()], job=job64)
+        self.assertEqual(len(timeline.read_timeline(self.logs, RUN, job64)), 1)
+        self.assertEqual(timeline.find_current(self.logs)[0].job_id, job64)
+        with self.assertRaises(timeline.TimelineError):
+            timeline.read_timeline(self.logs, RUN, job65)
+
+    def test_job_id_65_not_current(self):
+        self.write([rec()], job="j" * 65)
+        self.assertIsNone(timeline.find_current(self.logs)[0])
+
     def test_symlink_root_refused(self):
         self.write([rec()])
         real = self.home / "real-logs"
