@@ -17,8 +17,8 @@ from datetime import datetime
 from typing import Callable, List, NamedTuple, Optional, Tuple
 
 STAGES = frozenset({"clj-kondo", "shadow-compile", "node-tests", "dev-tooling-tests", "integration-preflight",
-                    "integration-node-tests", "arch-contract-map", "verify-job"})
-JOB_STAGE = "verify-job"  # only its terminal events end a job; per-check failed/timeout/cancelled are not job-terminal
+                    "integration-node-tests", "arch-contract-map", "verification"})
+JOB_STAGE = "verification"  # only its terminal events end a job; per-check failed/timeout/cancelled are not job-terminal
 EVENTS = frozenset({"started", "heartbeat", "completed", "failed", "timeout", "cancelled"})
 TERMINAL_EVENTS = frozenset({"completed", "failed", "timeout", "cancelled"})
 PROCESS_STATES = frozenset({"running", "exited", "timed_out", "cancelled", "not_run"})

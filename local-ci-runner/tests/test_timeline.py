@@ -85,16 +85,16 @@ class Progress(TimelineCase):
 
     def test_job_terminal_events_clear_current(self):
         for ev, state, code in (("completed", "exited", 0), ("failed", "exited", 1), ("timeout", "timed_out", None), ("cancelled", "cancelled", None)):
-            self.write([rec("node-tests", "started"), rec("verify-job", ev, 9, None, state, code)])
+            self.write([rec("node-tests", "started"), rec("verification", ev, 9, None, state, code)])
             self.assertIsNone(timeline.find_current(self.logs)[0], ev)
             rc, out, _ = self.run_cli("status")
             self.assertIn("progress    : none", out)
             self.assertNotIn("node-tests", out)
 
     def test_terminal_job_remains_available_to_explicit_lookup(self):
-        self.write([rec("node-tests", "started"), rec("verify-job", "failed", 9, None, "exited", 1)])
+        self.write([rec("node-tests", "started"), rec("verification", "failed", 9, None, "exited", 1)])
         recs = timeline.read_timeline(self.logs, RUN, JOB)
-        self.assertEqual([r["stage"] for r in recs], ["node-tests", "verify-job"])
+        self.assertEqual([r["stage"] for r in recs], ["node-tests", "verification"])
 
     def test_newest_active_job_wins(self):
         self.write([rec(ts="2026-01-02T03:00:00Z")], run="111", job="old")
@@ -151,7 +151,7 @@ class Validation(TimelineCase):
             self.bad(line({**rec(), k: v}))
 
     def test_valid_nullables_and_stages(self):
-        for st in ("clj-kondo", "shadow-compile", "node-tests", "dev-tooling-tests", "integration-preflight", "integration-node-tests", "arch-contract-map", "verify-job"):
+        for st in ("clj-kondo", "shadow-compile", "node-tests", "dev-tooling-tests", "integration-preflight", "integration-node-tests", "arch-contract-map", "verification"):
             self.write([rec(st, "started", pid=None, state="not_run", exit_status=None, est=None)])
             self.assertEqual(len(timeline.read_timeline(self.logs, RUN, JOB)), 1)
 
@@ -251,13 +251,13 @@ class Rotation(TimelineCase):
         self.assertEqual(timeline.read_timeline(self.logs, RUN, JOB)[0]["stage"], "dev-tooling-tests")
 
     def test_active_state_comes_from_newest_file(self):
-        self.write([rec("verify-job", "completed", 9, None, "exited", 0)], name="timeline.log.1")
+        self.write([rec("verification", "completed", 9, None, "exited", 0)], name="timeline.log.1")
         self.write([rec("node-tests", "started")])
         self.assertIsNotNone(timeline.find_current(self.logs)[0])
 
     def test_terminal_in_newest_file_after_rotation(self):
         self.write([rec("node-tests", "started")], name="timeline.log.1")
-        self.write([rec("verify-job", "failed", 9, None, "exited", 1)])
+        self.write([rec("verification", "failed", 9, None, "exited", 1)])
         self.assertIsNone(timeline.find_current(self.logs)[0])
 
     def test_total_bound(self):
@@ -288,7 +288,7 @@ class Follow(TimelineCase):
         self.assertIn("no active job", out)
 
     def test_terminal_job_not_followed(self):
-        self.write([rec(), rec("verify-job", "completed", 9, None, "exited", 0)])
+        self.write([rec(), rec("verification", "completed", 9, None, "exited", 0)])
         rc, out, _ = self.run_cli("logs", "--follow")
         self.assertEqual(rc, 1)
         self.assertNotIn("node-tests", out)
@@ -298,11 +298,11 @@ class Follow(TimelineCase):
         add = lambda r: (lambda: append(f, line(r)))
         rc, out, _ = self.follow([add(rec("clj-kondo", "failed", 5, 7, "exited", 1)),
                                   add(rec("node-tests", "heartbeat", 60000, 8, "running", None, {"estimated": True, "percent": 10})),
-                                  add(rec("verify-job", "failed", 70000, None, "exited", 1))])
+                                  add(rec("verification", "failed", 70000, None, "exited", 1))])
         self.assertEqual(rc, 0)
         lines = out.strip().splitlines()
         self.assertEqual(len(lines), 4)
-        self.assertIn("clj-kondo", lines[0]); self.assertIn("failed", lines[1]); self.assertIn("~10%", lines[2]); self.assertIn("verify-job", lines[3])
+        self.assertIn("clj-kondo", lines[0]); self.assertIn("failed", lines[1]); self.assertIn("~10%", lines[2]); self.assertIn("verification", lines[3])
 
     def test_no_duplicates_on_repoll_and_rotation(self):
         f = self.write([rec("clj-kondo", "started", 0)])
@@ -310,7 +310,7 @@ class Follow(TimelineCase):
         def rotate():
             f.rename(f.parent / "timeline.log.1")
             self.write([rec("node-tests", "started", 1)])
-        rc, out, _ = self.follow([lambda: None, rotate, lambda: self.write([rec("node-tests", "started", 1), rec("verify-job", "completed", 9, None, "exited", 0)])])
+        rc, out, _ = self.follow([lambda: None, rotate, lambda: self.write([rec("node-tests", "started", 1), rec("verification", "completed", 9, None, "exited", 0)])])
         lines = out.strip().splitlines()
         self.assertEqual(sum("clj-kondo" in l for l in lines), 1)
         self.assertEqual(sum("node-tests" in l for l in lines), 1)
@@ -341,13 +341,47 @@ class Follow(TimelineCase):
         self.assertNotIn("arch-contract-map", out)
 
     def test_follow_is_read_only(self):
-        self.write([rec(), rec("verify-job", "failed", 9, None, "exited", 1)])
+        self.write([rec(), rec("verification", "failed", 9, None, "exited", 1)])
         before = self.snapshot()
         self.run_cli("logs", "--follow")
         self.run_cli("status")
         self.assertEqual(self.snapshot(), before)
 
     def test_does_not_shell_out(self):
-        self.write([rec(), rec("verify-job", "failed", 9, None, "exited", 1)])
+        self.write([rec(), rec("verification", "failed", 9, None, "exited", 1)])
         with mock.patch("subprocess.Popen", side_effect=AssertionError("spawn")), mock.patch("subprocess.run", side_effect=AssertionError("spawn")):
             self.run_cli("logs", "--follow")
+
+
+class ReplicContract(TimelineCase):
+    """Fixed-schema Repli-shaped lifecycle records (stage 'verification' is the job; others are per-check stages)."""
+    STAGES = ("clj-kondo", "shadow-compile", "node-tests", "dev-tooling-tests", "integration-preflight",
+              "integration-node-tests", "arch-contract-map")
+
+    def test_repli_lifecycle_validates_and_terminates(self):
+        job_start = rec("verification", "started", 0, 100, "running")
+        stages = [rec(s, "started", i, 100 + i, "running") for i, s in enumerate(self.STAGES)]
+        self.write([job_start] + stages)
+        self.assertEqual(len(timeline.read_timeline(self.logs, RUN, JOB)), 1 + len(self.STAGES))
+        cur = timeline.find_current(self.logs)[0]
+        self.assertIsNotNone(cur)
+        rc, out, _ = self.run_cli("status")
+        self.assertIn("arch-contract-map", out)
+        self.write([job_start] + stages + [rec("verification", "completed", 99, None, "exited", 0)])
+        self.assertIsNone(timeline.find_current(self.logs)[0])
+        rc, out, _ = self.run_cli("status")
+        self.assertIn("progress    : none", out)
+
+    def test_follow_terminates_on_repli_job_completion(self):
+        f = self.write([rec("verification", "started", 0, 100, "running"), rec("integration-preflight", "started", 1)])
+        add = lambda r: (lambda: append(f, line(r)))
+        rc, out, _ = Follow.follow(self, [add(rec("integration-preflight", "completed", 5, None, "exited", 0)),
+                                          add(rec("verification", "completed", 9, None, "exited", 0))])
+        self.assertEqual(rc, 0)
+        lines = out.strip().splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertIn("integration-preflight", lines[1]); self.assertIn("verification", lines[3])
+
+    def test_per_check_failure_is_not_job_terminal(self):
+        self.write([rec("verification", "started", 0, 100, "running"), rec("node-tests", "failed", 5, None, "exited", 1)])
+        self.assertIsNotNone(timeline.find_current(self.logs)[0])
