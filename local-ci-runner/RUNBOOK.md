@@ -126,13 +126,17 @@ installed globally as a workaround.
 
 ### Matplotlib font cache
 
-A cold Matplotlib font cache makes the first import of a Matplotlib-using service slow enough to miss a short readiness window.
+A cold Matplotlib font cache is the suspected cause of a service missing a short readiness window on its first start (a hypothesis from one
+blocked canonical run, not yet measured on the CI account); pre-building it removes that variable.
 `scripts/preseed_matplotlib_font_cache.py` is run by `--apply` as the dedicated non-admin account, with a cleared environment and the
 managed Python in isolated mode (`env -i ... python -I -`, script read from stdin). It:
 
 - uses the platform default cache location under the account's home and ignores `MPLCONFIGDIR`/`XDG_*` overrides, so a job that sets
   such an override will not benefit;
-- refuses (exit 2, nothing written) a symlinked cache directory or font-list entry, a non-directory, or anything not owned by the account;
+- refuses (exit 2, nothing written) a symlinked cache directory, a non-directory, or any font-list/stamp entry that is a symlink, not a
+  regular file, not owned by the account, or hardlinked (so mode repair can never change an unrelated file);
+- treats a font list that is not a parseable JSON object as stale and rebuilds it, and reports unexpected I/O errors as
+  `status=failed reason=io_error` instead of a traceback;
 - creates the cache directory mode `0700` and font-list/stamp files mode `0600`, and restores those modes on a repeat run without
   rebuilding (`action=fix_mode`); the stamp is written through a uniquely named, exclusively created temporary file;
 - records the Python and Matplotlib versions in a stamp file and rebuilds only when either changes (or the stamp is missing/corrupt);
@@ -140,7 +144,13 @@ managed Python in isolated mode (`env -i ... python -I -`, script read from stdi
 - is idempotent: a repeat run with an unchanged stamp does nothing;
 - prints fixed `key=value` fields only (never paths or environment values); without `--apply` it imports no Matplotlib and writes nothing.
 
-Matplotlib is installed by the repository's dependency step, not by this script. On a brand-new account the helper therefore reports
+Matplotlib is installed by the repository's dependency step, not by this script. The helper looks only in the managed Python's own
+environment (isolated mode: no user site, no `PYTHON*` variables); if the repository ever installs into a venv or `--user` site it will
+report the package absent, which `--require-font-cache` turns into a hard failure rather than a silent skip. Threat model: the cache
+directory is private to the one CI account, so checks are lstat-based hygiene against stale or misplaced entries, not a defence against a
+concurrent attacker running as that same account.
+
+On a brand-new account the helper therefore reports
 `skipped_matplotlib_absent` plus a stderr WARNING (not a failure, but the cache is **not** pre-built); rerun `--apply
 --require-font-cache` after the first dependency install and before the first service start. `--require-font-cache` turns the absent case into
 a failure, so use it for the final pre-run preseed. The manifest records the result as

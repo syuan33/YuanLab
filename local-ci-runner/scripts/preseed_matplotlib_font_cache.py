@@ -57,6 +57,22 @@ def _fontlists(cache_dir):
                   if n.startswith(FONTLIST_GLOB_PREFIX) and n.endswith(FONTLIST_GLOB_SUFFIX))
 
 
+def _check_entry(path, uid):
+    """Every cache entry we may read, chmod or delete must be a private-able, single-link regular file we own."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(st.st_mode):
+        raise Refused("cache_entry_is_symlink")
+    if not stat.S_ISREG(st.st_mode):
+        raise Refused("cache_entry_not_regular")
+    if st.st_uid != uid:
+        raise Refused("cache_entry_not_owned")
+    if st.st_nlink != 1:
+        raise Refused("cache_entry_hardlinked")
+
+
 def _check_cache_dir(cache_dir, uid):
     try:
         st = os.lstat(cache_dir)
@@ -68,16 +84,17 @@ def _check_cache_dir(cache_dir, uid):
         raise Refused("cache_dir_not_directory")
     if st.st_uid != uid:
         raise Refused("cache_dir_not_owned")
-    for name in _fontlists(cache_dir):
-        entry = os.lstat(os.path.join(cache_dir, name))
-        if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
-            raise Refused("cache_entry_is_symlink")
-        if entry.st_uid != uid:
-            raise Refused("cache_entry_not_owned")
-    stamp = os.path.join(cache_dir, STAMP_NAME)
-    if os.path.lexists(stamp) and os.path.islink(stamp):
-        raise Refused("cache_entry_is_symlink")
+    for name in _fontlists(cache_dir) + [STAMP_NAME]:
+        _check_entry(os.path.join(cache_dir, name), uid)
     return True
+
+
+def _valid_fontlist(path):
+    try:
+        with open(path) as fh:
+            return isinstance(json.load(fh), dict)
+    except (OSError, ValueError):
+        return False
 
 
 def _read_stamp(cache_dir):
@@ -112,7 +129,8 @@ def _plan(cache_dir, exists, versions):
         return "build"
     stamp = _read_stamp(cache_dir)
     fresh = (stamp is not None and stamp.get("python") == versions["python"]
-             and stamp.get("matplotlib") == versions["matplotlib"] and bool(_fontlists(cache_dir)))
+             and stamp.get("matplotlib") == versions["matplotlib"] and bool(_fontlists(cache_dir))
+             and all(_valid_fontlist(os.path.join(cache_dir, n)) for n in _fontlists(cache_dir)))
     if fresh:
         return "none" if _modes_private(cache_dir) else "fix_mode"
     return "rebuild" if (stamp is not None or _fontlists(cache_dir)) else "build"
@@ -132,7 +150,7 @@ def _write_stamp(cache_dir, versions):
         raise
 
 
-def main(argv=None, *, environ=None, home=None, uid=None, platform=None, versions=None, builder=None, stdout=None):
+def main(argv=None, *, home=None, uid=None, platform=None, versions=None, builder=None, stdout=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     out = sys.stdout if stdout is None else stdout
     home = os.path.expanduser("~") if home is None else home
@@ -194,8 +212,10 @@ def main(argv=None, *, environ=None, home=None, uid=None, platform=None, version
             return 1
         for name in names:
             path = os.path.join(cache_dir, name)
-            if os.path.islink(path):
-                raise Refused("cache_entry_is_symlink")
+            _check_entry(path, uid)
+            if not _valid_fontlist(path):
+                emit(mode=mode, status="failed", action=action, reason="fontlist_invalid")
+                return 1
             os.chmod(path, 0o600)
         _write_stamp(cache_dir, v)
         emit(mode=mode, status="ok", action=action)
@@ -203,6 +223,9 @@ def main(argv=None, *, environ=None, home=None, uid=None, platform=None, version
     except Refused as exc:
         emit(mode=mode, status="refused", reason=exc.reason)
         return 2
+    except OSError:
+        emit(mode=mode, status="failed", reason="io_error")
+        return 1
 
 
 if __name__ == "__main__":

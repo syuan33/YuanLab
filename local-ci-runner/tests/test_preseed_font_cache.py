@@ -44,11 +44,10 @@ class Base(TmpCase):
         self.env_seen.append(dict(os.environ))
         (Path(cache_dir) / "fontlist-v390.json").write_text("{}")
 
-    def run_helper(self, *argv, environ=None, versions="default", builder="default", uid=None):
+    def run_helper(self, *argv, versions="default", builder="default", uid=None):
         out = io.StringIO()
         rc = self.h.main(
             list(argv),
-            environ={} if environ is None else environ,
             home=str(self.home),
             uid=os.getuid() if uid is None else uid,
             platform="darwin",
@@ -161,16 +160,18 @@ class RepairRound1Test(Base):
         self.assertEqual(stat.S_IMODE((self.cache / ".local-ci-font-cache-stamp.json").stat().st_mode), 0o600)
         self.assertIn("action=none", self.run_helper("--apply")[1])
 
-    def test_F17_stamp_write_never_truncates_a_hardlinked_temp_and_leaves_no_temp(self):
-        self.run_helper("--apply")
-        victim = self.tmp / "victim.txt"
-        victim.write_text("keep")
-        os.link(victim, self.cache / ".local-ci-font-cache-stamp.json.tmp")
-        self.versions = {"python": "3.11.9", "matplotlib": "3.10.0"}
-        self.assertEqual(self.run_helper("--apply")[0], 0)
-        self.assertEqual(victim.read_text(), "keep")
-        leftovers = [n for n in os.listdir(self.cache) if ".tmp" in n and n != ".local-ci-font-cache-stamp.json.tmp"]
-        self.assertEqual(leftovers, [])
+    def test_F17_stamp_write_failure_leaves_no_temp_and_no_valid_stamp(self):
+        real_replace = os.replace
+        def fail(src, dst):
+            raise OSError("synthetic replace failure")
+        os.replace = fail
+        self.addCleanup(lambda: setattr(os, "replace", real_replace))
+        rc, out = self.run_helper("--apply")
+        os.replace = real_replace
+        self.assertEqual(rc, 1)
+        self.assertIn("reason=io_error", out)
+        self.assertEqual([n for n in os.listdir(self.cache) if ".tmp" in n], [])
+        self.assertFalse((self.cache / ".local-ci-font-cache-stamp.json").exists())
 
     def test_F18_require_flag_turns_absent_matplotlib_into_a_failure(self):
         absent = lambda: {"python": "3.11.9", "matplotlib": None}
@@ -181,6 +182,78 @@ class RepairRound1Test(Base):
         self.assertIn("reason=matplotlib_absent", out)
         self.assertEqual(snapshot(self.home), before)
         self.assertEqual(self.run_helper("--apply", versions=absent)[0], 0)
+
+
+class RepairRound2Test(Base):
+    def _applied(self):
+        self.run_helper("--apply")
+        return self.cache / ".local-ci-font-cache-stamp.json", self.cache / "fontlist-v390.json"
+
+    def test_F19_truncated_fontlist_with_matching_stamp_is_rebuilt(self):
+        stamp, fontlist = self._applied()
+        fontlist.write_text('{"ttflist": [')
+        n = len(self.builds)
+        rc, out = self.run_helper("--apply")
+        self.assertEqual(rc, 0)
+        self.assertIn("action=rebuild", out)
+        self.assertEqual(len(self.builds), n + 1)
+
+    def test_F20_stamp_directory_is_refused_not_a_traceback(self):
+        stamp, _ = self._applied()
+        stamp.unlink()
+        stamp.mkdir()
+        rc, out = self.run_helper("--apply")
+        self.assertEqual(rc, 2)
+        self.assertIn("reason=cache_entry_not_regular", out)
+
+    def test_F21_fifo_stamp_is_refused_without_blocking(self):
+        stamp, _ = self._applied()
+        stamp.unlink()
+        os.mkfifo(stamp)
+        rc, out = self.run_helper("--apply")
+        self.assertEqual(rc, 2)
+        self.assertIn("reason=cache_entry_not_regular", out)
+
+    def test_F22_hardlinked_stamp_or_fontlist_is_refused_and_target_modes_untouched(self):
+        stamp, fontlist = self._applied()
+        for entry in (stamp, fontlist):
+            victim = self.tmp / ("victim-" + entry.name)
+            victim.write_text("keep")
+            os.chmod(victim, 0o644)
+            os.link(victim, self.cache / (entry.name + ".link"))
+            # replace the real entry with a hardlink to the victim
+            entry.unlink()
+            os.link(victim, entry)
+            os.chmod(self.cache, 0o777)
+            rc, out = self.run_helper("--apply")
+            self.assertEqual(rc, 2, out)
+            self.assertIn("reason=cache_entry_hardlinked", out)
+            self.assertEqual(stat.S_IMODE(victim.stat().st_mode), 0o644)
+            self.assertEqual(victim.read_text(), "keep")
+            entry.unlink()
+            (self.cache / (entry.name + ".link")).unlink()
+            self.run_helper("--apply")
+
+    def test_F23_non_regular_fontlist_and_non_directory_cache_are_refused(self):
+        _, fontlist = self._applied()
+        fontlist.unlink()
+        fontlist.mkdir()
+        self.assertIn("reason=cache_entry_not_regular", self.run_helper("--apply")[1])
+        fontlist.rmdir()
+        import shutil
+        shutil.rmtree(self.cache)
+        self.cache.write_text("not a dir")
+        rc, out = self.run_helper("--apply")
+        self.assertEqual(rc, 2)
+        self.assertIn("reason=cache_dir_not_directory", out)
+
+    def test_F24_unexpected_oserror_is_reported_as_fixed_fields_not_a_traceback(self):
+        def oserr(cache_dir):
+            raise PermissionError("synthetic")
+        rc, out = self.run_helper("--apply", builder=oserr)
+        self.assertEqual(rc, 1)
+        self.assertIn("status=failed", out)
+        self.assertNotIn("Traceback", out)
 
 
 class RefusalTest(Base):
@@ -242,9 +315,11 @@ class RefusalTest(Base):
 
 class HygieneTest(Base):
     def test_F12_output_never_contains_home_or_env_values(self):
-        env = {"SECRET_TOKEN": SECRET, "HOME": str(self.home)}
+        saved = dict(os.environ)
+        os.environ["SECRET_TOKEN"] = SECRET
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
         for argv in ((), ("--apply",)):
-            rc, out = self.run_helper(*argv, environ=env)
+            rc, out = self.run_helper(*argv)
             self.assertEqual(rc, 0)
             self.assertNotIn(SECRET, out)
             self.assertNotIn(str(self.home), out)
@@ -257,7 +332,7 @@ class HygieneTest(Base):
         saved = dict(os.environ)
         os.environ.update(env)
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
-        rc, _ = self.run_helper("--apply", environ=env)
+        rc, _ = self.run_helper("--apply")
         self.assertEqual(rc, 0)
         self.assertTrue((self.cache / "fontlist-v390.json").exists())
         self.assertEqual(list(elsewhere.iterdir()), [])
@@ -267,7 +342,7 @@ class HygieneTest(Base):
 
     def test_F15_linux_default_cache_dir_is_xdg_style(self):
         out = io.StringIO()
-        rc = self.h.main(["--apply"], environ={}, home=str(self.home), uid=os.getuid(), platform="linux",
+        rc = self.h.main(["--apply"], home=str(self.home), uid=os.getuid(), platform="linux",
                          versions=lambda: dict(self.versions), builder=self.builder, stdout=out)
         self.assertEqual(rc, 0)
         self.assertTrue((self.home / ".cache" / "matplotlib" / "fontlist-v390.json").exists())
