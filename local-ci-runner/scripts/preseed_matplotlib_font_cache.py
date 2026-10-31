@@ -115,15 +115,15 @@ def _usable_fontlist(path, expected):
     if expected is not None and data["_version"] != expected:
         return False
     tt = data.get("ttflist")
-    return isinstance(tt, list) and len(tt) > 0
+    if not isinstance(tt, list) or not tt:
+        return False
+    return all(isinstance(e, dict) and isinstance(e.get("fname"), str) and e["fname"]
+               and isinstance(e.get("name"), str) and e["name"] for e in tt)
 
 
 def _fontlists_ready(cache_dir, expected):
-    names = _fontlists(cache_dir)
-    if expected is not None:
-        wanted = "%s%d%s" % (FONTLIST_GLOB_PREFIX, expected, FONTLIST_GLOB_SUFFIX)
-        return wanted in names and _usable_fontlist(os.path.join(cache_dir, wanted), expected)
-    return bool(names) and all(_usable_fontlist(os.path.join(cache_dir, n), None) for n in names)
+    wanted = "%s%d%s" % (FONTLIST_GLOB_PREFIX, expected, FONTLIST_GLOB_SUFFIX)
+    return wanted in _fontlists(cache_dir) and _usable_fontlist(os.path.join(cache_dir, wanted), expected)
 
 
 def _read_stamp(cache_dir):
@@ -207,10 +207,19 @@ def main(argv=None, *, fontlist_version=None, home=None, uid=None, platform=None
         emit(mode=mode, status="skipped_matplotlib_absent", action="none")
         return 0
 
+    # Fail closed: without Matplotlib's cache-format version we cannot tell a usable font list from a stale one, so
+    # never claim readiness and never write anything.
+    expected = fontlist_version()
+    if expected is None:
+        if require:
+            emit(mode=mode, status="failed", reason="font_cache_version_unknown")
+            return 3
+        emit(mode=mode, status="skipped_font_cache_version_unknown", action="none")
+        return 0
+
     cache_dir = default_cache_dir(home, platform)
     try:
         exists = _check_cache_dir(cache_dir, uid)
-        expected = fontlist_version()
         action = _plan(cache_dir, exists, v, expected)
         if not apply or action == "none":
             emit(mode=mode, status="ok" if apply else "planned", action=action)

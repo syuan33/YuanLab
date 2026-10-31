@@ -121,7 +121,8 @@ installed globally as a workaround.
 - validates Python, SSL and pip as the dedicated account;
 - verifies existing Node 22/Java 21 caches, or explicitly defers their first population to pinned setup actions;
 - checksum-verifies clj-kondo in a temporary directory and records a mode-0600, non-secret preseed manifest;
-- pre-builds the Matplotlib font cache for the managed Python (see below);
+- pre-builds the Matplotlib font cache for the managed Python (see below); this imports `matplotlib.font_manager` from the managed
+  Python's site-packages as the CI account, so it executes already-installed third-party code (not repository code) with that account's rights;
 - never starts/registers the runner, requests a GitHub token, changes a workflow, installs repository dependencies or runs repository code.
 
 ### Matplotlib font cache
@@ -135,10 +136,12 @@ managed Python in isolated mode (`env -i ... python -I -`, script read from stdi
   forwarding), which is exercised by tests with a stub helper;
 - uses the platform default cache location under the account's home and ignores `MPLCONFIGDIR`/`XDG_*` overrides, so a job that sets
   such an override will not benefit;
-- refuses (exit 2, nothing written) a symlinked cache directory, a non-directory, or any font-list/stamp entry that is a symlink, not a
+- refuses (exit 2; pre-flight refusals touch nothing, while a refusal after a build began leaves no stamp so the next run rebuilds) a symlinked cache directory, a non-directory, or any font-list/stamp entry that is a symlink, not a
   regular file, not owned by the account, or hardlinked (so mode repair can never change an unrelated file);
 - treats the font list as fresh only when the file for the cache-format version Matplotlib expects (read from its source, without importing
-  it) exists with that `_version` and a non-empty `ttflist`; anything else is stale and rebuilt, and reports unexpected I/O errors as
+  it) exists with that `_version` and a non-empty `ttflist` whose entries each have a non-empty `fname` and `name`; anything else is stale and
+  rebuilt. If the expected version cannot be read from the Matplotlib source, the helper fails closed (`skipped_font_cache_version_unknown`,
+  nothing written, WARNING; a hard failure under `--require-font-cache`), and reports unexpected I/O errors as
   `status=failed reason=io_error` instead of a traceback;
 - creates the cache directory mode `0700` and font-list/stamp files mode `0600`, and restores those modes on a repeat run without
   rebuilding (`action=fix_mode`); the stamp is written through a uniquely named, exclusively created temporary file;

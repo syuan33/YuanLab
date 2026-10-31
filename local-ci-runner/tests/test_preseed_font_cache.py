@@ -15,7 +15,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 HELPER = SCRIPTS / "preseed_matplotlib_font_cache.py"
 PRESEED = SCRIPTS / "preseed-macos-ci-toolchain.sh"
 STEP = SCRIPTS / "preseed_font_cache_step.sh"
-GOOD_FONTLIST = {"_version": 390, "default_size": 10.0, "ttflist": [{"name": "Synthetic Sans"}], "afmlist": []}
+GOOD_FONTLIST = {"_version": 390, "default_size": 10.0, "ttflist": [{"fname": "synthetic/Sans.ttf", "name": "Synthetic Sans"}], "afmlist": []}
 SECRET = "SYNTHETIC-SECRET-VALUE-0000"  # synthetic sentinel, must never be echoed
 
 
@@ -46,14 +46,14 @@ class Base(TmpCase):
         self.env_seen.append(dict(os.environ))
         (Path(cache_dir) / "fontlist-v390.json").write_text(json.dumps(GOOD_FONTLIST))
 
-    def run_helper(self, *argv, versions="default", builder="default", uid=None):
+    def run_helper(self, *argv, versions="default", builder="default", uid=None, fontlist_version=lambda: 390):
         out = io.StringIO()
         rc = self.h.main(
             list(argv),
             home=str(self.home),
             uid=os.getuid() if uid is None else uid,
             platform="darwin",
-            fontlist_version=lambda: 390,
+            fontlist_version=fontlist_version,
             versions=(lambda: dict(self.versions)) if versions == "default" else versions,
             builder=self.builder if builder == "default" else builder,
             stdout=out,
@@ -187,6 +187,59 @@ class RepairRound1Test(Base):
         self.assertEqual(self.run_helper("--apply", versions=absent)[0], 0)
 
 
+class RepairRound4Test(Base):
+    def test_F32_malformed_font_entries_are_not_usable(self):
+        self.run_helper("--apply")
+        fontlist = self.cache / "fontlist-v390.json"
+        for bad in ([None], [{}], [{"name": "x"}], [{"fname": "x.ttf"}], [{"fname": "", "name": "x"}], [1], [GOOD_FONTLIST["ttflist"][0], None]):
+            fontlist.write_text(json.dumps(dict(GOOD_FONTLIST, ttflist=bad)))
+            n = len(self.builds)
+            rc, out = self.run_helper("--apply")
+            self.assertEqual((rc, "action=rebuild" in out, len(self.builds)), (0, True, n + 1), (bad, out))
+
+    def test_F33_builder_writing_malformed_entries_is_not_stamped(self):
+        def bad(cache_dir):
+            (Path(cache_dir) / "fontlist-v390.json").write_text(json.dumps(dict(GOOD_FONTLIST, ttflist=[None])))
+        rc, out = self.run_helper("--apply", builder=bad)
+        self.assertEqual(rc, 1)
+        self.assertIn("reason=fontlist_invalid", out)
+        self.assertFalse((self.cache / ".local-ci-font-cache-stamp.json").exists())
+
+    def test_F34_unknown_cache_format_version_fails_closed_without_writes(self):
+        self.run_helper("--apply")
+        before = snapshot(self.home)
+        n = len(self.builds)
+        for argv in (("--apply",), ()):
+            rc, out = self.run_helper(*argv, fontlist_version=lambda: None)
+            self.assertEqual(rc, 0)
+            self.assertIn("status=skipped_font_cache_version_unknown", out)
+            self.assertNotIn("status=ok", out)
+            self.assertNotIn("status=planned", out)
+        self.assertEqual(len(self.builds), n)
+        self.assertEqual(snapshot(self.home), before)
+
+    def test_F35_unknown_cache_format_version_is_a_failure_when_required(self):
+        rc, out = self.run_helper("--apply", "--require-matplotlib", fontlist_version=lambda: None)
+        self.assertEqual(rc, 3)
+        self.assertIn("status=failed", out)
+        self.assertIn("reason=font_cache_version_unknown", out)
+        self.assertFalse(self.cache.exists())
+
+    def test_F36_real_version_lookup_reads_matplotlib_source_without_importing(self):
+        import sys
+        pkg = self.tmp / "site" / "matplotlib"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("raise RuntimeError('must not be imported')\n")
+        (pkg / "font_manager.py").write_text("class FontManager:\n    __version__ = 777\n")
+        sys.path.insert(0, str(self.tmp / "site"))
+        self.addCleanup(lambda: sys.path.remove(str(self.tmp / "site")))
+        sys.modules.pop("matplotlib", None)
+        self.assertEqual(self.h._real_fontlist_version(), 777)
+        self.assertNotIn("matplotlib", sys.modules)
+        (pkg / "font_manager.py").write_text("class FontManager:\n    version = 1\n")
+        self.assertIsNone(self.h._real_fontlist_version())
+
+
 class RepairRound3Test(Base):
     def _applied(self):
         self.run_helper("--apply")
@@ -297,6 +350,12 @@ class StepHarnessTest(TmpCase):
         r = self.run_step(self.ARGV_STUB, True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("STATE:strict_apply", r.stdout)
+
+    def test_H06_version_unknown_skip_also_warns(self):
+        r = self.run_step('print("mode=apply status=skipped_font_cache_version_unknown action=none")\n', False)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("STATE:skipped_font_cache_version_unknown", r.stdout)
+        self.assertIn("WARNING: Matplotlib font cache NOT pre-built", r.stderr)
 
     def test_H03_skip_warns_on_stderr_and_continues_when_not_required(self):
         r = self.run_step('print("mode=apply status=skipped_matplotlib_absent action=none")\n', False)
@@ -508,6 +567,7 @@ class PreseedScriptContractTest(TmpCase):
         step = STEP.read_text()
         self.assertIn("--require-matplotlib", step)
         self.assertIn("WARNING: Matplotlib font cache NOT pre-built", step)
+        self.assertIn("skipped_font_cache_version_unknown", step)
         self.assertIn("--require-font-cache requires --apply", self.src)
 
     def test_S04_manifest_records_font_cache_status(self):

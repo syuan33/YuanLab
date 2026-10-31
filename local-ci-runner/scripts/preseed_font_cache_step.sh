@@ -19,8 +19,8 @@ font_cache_step() {
   [ "$rc" -eq 0 ] || die "Matplotlib font-cache preseed failed: ${out:-no output}"
   FONT_CACHE_STATE="$(printf '%s\n' "$out" | /usr/bin/sed -n 's/.*status=\([a-z_]*\).*/\1/p' | /usr/bin/head -n 1)"
   [ -n "$FONT_CACHE_STATE" ] || die 'Matplotlib font-cache helper returned no status'
-  if [ "$FONT_CACHE_STATE" = "skipped_matplotlib_absent" ]; then
-    printf 'WARNING: Matplotlib font cache NOT pre-built (Matplotlib is not installed for the managed Python yet).\n' >&2
+  if [ "$FONT_CACHE_STATE" = "skipped_matplotlib_absent" ] || [ "$FONT_CACHE_STATE" = "skipped_font_cache_version_unknown" ]; then
+    printf 'WARNING: Matplotlib font cache NOT pre-built (%s).\n' "$FONT_CACHE_STATE" >&2
     printf '         Rerun with --apply --require-font-cache after the repository dependencies are installed.\n' >&2
   fi
 }
