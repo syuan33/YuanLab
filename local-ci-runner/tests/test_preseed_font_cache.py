@@ -14,6 +14,8 @@ from tests.fixtures import TmpCase
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 HELPER = SCRIPTS / "preseed_matplotlib_font_cache.py"
 PRESEED = SCRIPTS / "preseed-macos-ci-toolchain.sh"
+STEP = SCRIPTS / "preseed_font_cache_step.sh"
+GOOD_FONTLIST = {"_version": 390, "default_size": 10.0, "ttflist": [{"name": "Synthetic Sans"}], "afmlist": []}
 SECRET = "SYNTHETIC-SECRET-VALUE-0000"  # synthetic sentinel, must never be echoed
 
 
@@ -42,7 +44,7 @@ class Base(TmpCase):
     def builder(self, cache_dir):
         self.builds.append(str(cache_dir))
         self.env_seen.append(dict(os.environ))
-        (Path(cache_dir) / "fontlist-v390.json").write_text("{}")
+        (Path(cache_dir) / "fontlist-v390.json").write_text(json.dumps(GOOD_FONTLIST))
 
     def run_helper(self, *argv, versions="default", builder="default", uid=None):
         out = io.StringIO()
@@ -51,6 +53,7 @@ class Base(TmpCase):
             home=str(self.home),
             uid=os.getuid() if uid is None else uid,
             platform="darwin",
+            fontlist_version=lambda: 390,
             versions=(lambda: dict(self.versions)) if versions == "default" else versions,
             builder=self.builder if builder == "default" else builder,
             stdout=out,
@@ -182,6 +185,135 @@ class RepairRound1Test(Base):
         self.assertIn("reason=matplotlib_absent", out)
         self.assertEqual(snapshot(self.home), before)
         self.assertEqual(self.run_helper("--apply", versions=absent)[0], 0)
+
+
+class RepairRound3Test(Base):
+    def _applied(self):
+        self.run_helper("--apply")
+        return self.cache / "fontlist-v390.json"
+
+    def test_F25_unusable_fontlist_objects_are_rebuilt(self):
+        fontlist = self._applied()
+        for bad in ({}, {"_version": 390, "ttflist": []}, {"_version": 330, "ttflist": [{"n": 1}]}, {"ttflist": [{"n": 1}]},
+                    {"_version": 390, "ttflist": "x"}):
+            fontlist.write_text(json.dumps(bad))
+            n = len(self.builds)
+            rc, out = self.run_helper("--apply")
+            self.assertEqual((rc, "action=rebuild" in out, len(self.builds)), (0, True, n + 1), (bad, out))
+
+    def test_F26_only_a_stale_version_fontlist_is_rebuilt_to_the_expected_one(self):
+        fontlist = self._applied()
+        fontlist.unlink()
+        (self.cache / "fontlist-v330.json").write_text(json.dumps(dict(GOOD_FONTLIST, _version=330)))
+        n = len(self.builds)
+        rc, out = self.run_helper("--apply")
+        self.assertEqual((rc, "action=rebuild" in out, len(self.builds)), (0, True, n + 1))
+        self.assertTrue(fontlist.exists())
+
+    def test_F27_builder_output_must_be_usable_for_the_expected_version(self):
+        def bad(cache_dir):
+            (Path(cache_dir) / "fontlist-v390.json").write_text("{}")
+        rc, out = self.run_helper("--apply", builder=bad)
+        self.assertEqual(rc, 1)
+        self.assertIn("reason=fontlist_invalid", out)
+        self.assertFalse((self.cache / ".local-ci-font-cache-stamp.json").exists())
+
+    def test_F28_oserror_outside_the_builder_is_io_error(self):
+        real = os.chmod
+        def boom(*a, **k):
+            raise PermissionError("synthetic")
+        os.chmod = boom
+        self.addCleanup(lambda: setattr(os, "chmod", real))
+        try:
+            rc, out = self.run_helper("--apply")
+        finally:
+            os.chmod = real
+        self.assertEqual(rc, 1)
+        self.assertIn("reason=io_error", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_F29_unknown_argument_is_refused(self):
+        rc, out = self.run_helper("--bogus")
+        self.assertEqual(rc, 2)
+        self.assertIn("reason=unknown_argument", out)
+
+    def test_F30_real_builder_refuses_a_cache_dir_that_matplotlib_would_not_use(self):
+        import sys, types
+        fake = types.ModuleType("matplotlib")
+        fake.get_cachedir = lambda: str(self.tmp / "elsewhere")
+        saved = {k: sys.modules.get(k) for k in ("matplotlib", "matplotlib.font_manager")}
+        sys.modules["matplotlib"] = fake
+        sys.modules.pop("matplotlib.font_manager", None)
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+        self.addCleanup(restore)
+        with self.assertRaises(self.h.Refused) as cm:
+            self.h._real_builder(str(self.cache))
+        self.assertEqual(cm.exception.reason, "cache_dir_mismatch")
+
+    def test_F31_stdin_entrypoint_runs_isolated_with_clean_env_and_fixed_output(self):
+        import sys
+        env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin"}
+        r = subprocess.run([sys.executable, "-I", "-"], input=HELPER.read_text(), env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout.strip(), r"^mode=dry-run status=(planned|skipped_matplotlib_absent) ")
+        self.assertNotIn(str(self.home), r.stdout + r.stderr)
+        self.assertEqual(os.listdir(self.home), [])  # dry-run wrote nothing
+
+
+class StepHarnessTest(TmpCase):
+    """Executes the real shell step with a stub helper: rc handling, status parsing, warning, strict forwarding."""
+
+    def run_step(self, helper_body, require):
+        helper = self.tmp / "stub_helper.py"
+        helper.write_text(helper_body)
+        script = (
+            'set -euo pipefail\n'
+            'die() { printf "DIE:%s\\n" "$*"; exit 9; }\n'
+            'source "$STEP"\n'
+            'FONT_CACHE_HELPER="$HELPER"; REQUIRE_FONT_CACHE=@REQ@\n'
+            'FONT_CACHE_RUN=("$PY" -I -)\n'
+            'font_cache_step\n'
+            'printf "STATE:%s\\n" "$FONT_CACHE_STATE"\n').replace("@REQ@", "1" if require else "0")
+        import sys
+        r = subprocess.run(["bash", "-c", script], env={"STEP": str(STEP), "HELPER": str(helper), "PY": sys.executable,
+                           "PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+        return r
+
+    ARGV_STUB = ('import sys\n'
+                 'a = sys.argv[1:]\n'
+                 'print("status=" + ("strict" if "--require-matplotlib" in a else "lax") + ("_apply" if "--apply" in a else "_noapply"))\n')
+
+    def test_H01_helper_gets_apply_and_no_strict_flag_by_default(self):
+        r = self.run_step(self.ARGV_STUB, False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("STATE:lax_apply", r.stdout)
+
+    def test_H02_strict_flag_is_forwarded_only_when_required(self):
+        r = self.run_step(self.ARGV_STUB, True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("STATE:strict_apply", r.stdout)
+
+    def test_H03_skip_warns_on_stderr_and_continues_when_not_required(self):
+        r = self.run_step('print("mode=apply status=skipped_matplotlib_absent action=none")\n', False)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("STATE:skipped_matplotlib_absent", r.stdout)
+        self.assertIn("WARNING: Matplotlib font cache NOT pre-built", r.stderr)
+
+    def test_H04_helper_failure_dies_with_its_fixed_fields(self):
+        r = self.run_step('print("status=failed reason=matplotlib_absent")\nraise SystemExit(3)\n', True)
+        self.assertEqual(r.returncode, 9)
+        self.assertIn("DIE:", r.stdout)
+        self.assertIn("reason=matplotlib_absent", r.stdout)
+
+    def test_H05_missing_status_dies(self):
+        r = self.run_step('print("garbage")\n', False)
+        self.assertEqual(r.returncode, 9)
+        self.assertIn("no status", r.stdout)
 
 
 class RepairRound2Test(Base):
@@ -342,7 +474,7 @@ class HygieneTest(Base):
 
     def test_F15_linux_default_cache_dir_is_xdg_style(self):
         out = io.StringIO()
-        rc = self.h.main(["--apply"], home=str(self.home), uid=os.getuid(), platform="linux",
+        rc = self.h.main(["--apply"], home=str(self.home), uid=os.getuid(), platform="linux", fontlist_version=lambda: 390,
                          versions=lambda: dict(self.versions), builder=self.builder, stdout=out)
         self.assertEqual(rc, 0)
         self.assertTrue((self.home / ".cache" / "matplotlib" / "fontlist-v390.json").exists())
@@ -361,18 +493,22 @@ class PreseedScriptContractTest(TmpCase):
         self.assertIn("preseed_matplotlib_font_cache.py", self.src)
         self.assertIn("env -i", self.src)
         self.assertIn('"${PYTHON_TOOLCACHE_ARCH}/python" -I -', self.src)
+        self.assertIn("preseed_font_cache_step.sh", self.src)
         self.assertIn('sudo -u "$CI_USER" /usr/bin/env -i', self.src)
 
     def test_S03_dry_run_plan_mentions_font_cache_and_does_not_invoke_helper_before_apply_gate(self):
         self.assertIn("Matplotlib font cache", self.src)
         gate = self.src.index('if [ "$APPLY" -ne 1 ]')
-        self.assertEqual(self.src.count('<"$FONT_CACHE_HELPER"'), 1)
-        self.assertGreater(self.src.index('<"$FONT_CACHE_HELPER"'), gate)
+        self.assertEqual(self.src.count("\nfont_cache_step\n"), 1)
+        self.assertGreater(self.src.index("\nfont_cache_step\n"), gate)
+        self.assertEqual(STEP.read_text().count('<"$FONT_CACHE_HELPER"'), 1)
 
     def test_S06_require_font_cache_flag_and_loud_skip_notice(self):
         self.assertIn("--require-font-cache", self.src)
-        self.assertIn("--require-matplotlib", self.src)
-        self.assertIn("WARNING: Matplotlib font cache NOT pre-built", self.src)
+        step = STEP.read_text()
+        self.assertIn("--require-matplotlib", step)
+        self.assertIn("WARNING: Matplotlib font cache NOT pre-built", step)
+        self.assertIn("--require-font-cache requires --apply", self.src)
 
     def test_S04_manifest_records_font_cache_status(self):
         self.assertIn("matplotlib_font_cache=", self.src)

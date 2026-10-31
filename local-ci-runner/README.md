@@ -77,8 +77,7 @@ applications/certificate helper and pip, and creates the exact setup-python cach
 It disables the package's shell-profile updater, `/usr/local/bin` compatibility shims and offline documentation. Only the Python 3.11
 framework is transferred to the dedicated account; the account remains non-admin and receives no sudo rule.
 
-With `--apply` it also pre-builds the Matplotlib font cache for the managed Python (private `0700` cache, rebuilt only when the
-Python/Matplotlib version changes; skipped with a notice until Matplotlib is installed). See the RUNBOOK for details.
+With `--apply` it also pre-builds the Matplotlib font cache for the managed Python (private `0700` cache, rebuilt only when stale: version change, missing/corrupt stamp or unusable font list; skipped with a notice until Matplotlib is installed). See the RUNBOOK for details.
 
 Node 22 and Java 21 are verified when their caches already exist. On a fresh host, their absence is reported as deferred—not as a
 failure—because the pinned `setup-node` and `setup-java` workflow actions will populate them without privilege. clj-kondo is downloaded

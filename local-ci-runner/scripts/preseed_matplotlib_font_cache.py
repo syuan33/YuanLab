@@ -89,12 +89,41 @@ def _check_cache_dir(cache_dir, uid):
     return True
 
 
-def _valid_fontlist(path):
+def _real_fontlist_version():
+    """Cache-format version Matplotlib expects (FontManager.__version__), read from source without importing it."""
+    try:
+        import importlib.util
+        import re
+        spec = importlib.util.find_spec("matplotlib")
+        base = os.path.dirname(spec.origin)
+        with open(os.path.join(base, "font_manager.py")) as fh:
+            m = re.search(r"^\s+__version__\s*=\s*(\d+)\s*$", fh.read(), re.M)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _usable_fontlist(path, expected):
+    """A font list Matplotlib would accept without rebuilding: right format version and at least one TrueType entry."""
     try:
         with open(path) as fh:
-            return isinstance(json.load(fh), dict)
+            data = json.load(fh)
     except (OSError, ValueError):
         return False
+    if not isinstance(data, dict) or not isinstance(data.get("_version"), int):
+        return False
+    if expected is not None and data["_version"] != expected:
+        return False
+    tt = data.get("ttflist")
+    return isinstance(tt, list) and len(tt) > 0
+
+
+def _fontlists_ready(cache_dir, expected):
+    names = _fontlists(cache_dir)
+    if expected is not None:
+        wanted = "%s%d%s" % (FONTLIST_GLOB_PREFIX, expected, FONTLIST_GLOB_SUFFIX)
+        return wanted in names and _usable_fontlist(os.path.join(cache_dir, wanted), expected)
+    return bool(names) and all(_usable_fontlist(os.path.join(cache_dir, n), None) for n in names)
 
 
 def _read_stamp(cache_dir):
@@ -124,13 +153,12 @@ def _tighten(cache_dir):
             os.chmod(path, 0o600)
 
 
-def _plan(cache_dir, exists, versions):
+def _plan(cache_dir, exists, versions, expected):
     if not exists:
         return "build"
     stamp = _read_stamp(cache_dir)
     fresh = (stamp is not None and stamp.get("python") == versions["python"]
-             and stamp.get("matplotlib") == versions["matplotlib"] and bool(_fontlists(cache_dir))
-             and all(_valid_fontlist(os.path.join(cache_dir, n)) for n in _fontlists(cache_dir)))
+             and stamp.get("matplotlib") == versions["matplotlib"] and _fontlists_ready(cache_dir, expected))
     if fresh:
         return "none" if _modes_private(cache_dir) else "fix_mode"
     return "rebuild" if (stamp is not None or _fontlists(cache_dir)) else "build"
@@ -150,7 +178,7 @@ def _write_stamp(cache_dir, versions):
         raise
 
 
-def main(argv=None, *, home=None, uid=None, platform=None, versions=None, builder=None, stdout=None):
+def main(argv=None, *, fontlist_version=None, home=None, uid=None, platform=None, versions=None, builder=None, stdout=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     out = sys.stdout if stdout is None else stdout
     home = os.path.expanduser("~") if home is None else home
@@ -158,6 +186,7 @@ def main(argv=None, *, home=None, uid=None, platform=None, versions=None, builde
     platform = sys.platform if platform is None else platform
     versions = _real_versions if versions is None else versions
     builder = _real_builder if builder is None else builder
+    fontlist_version = _real_fontlist_version if fontlist_version is None else fontlist_version
 
     def emit(**fields):
         out.write(" ".join("%s=%s" % kv for kv in fields.items()) + "\n")
@@ -181,7 +210,8 @@ def main(argv=None, *, home=None, uid=None, platform=None, versions=None, builde
     cache_dir = default_cache_dir(home, platform)
     try:
         exists = _check_cache_dir(cache_dir, uid)
-        action = _plan(cache_dir, exists, v)
+        expected = fontlist_version()
+        action = _plan(cache_dir, exists, v, expected)
         if not apply or action == "none":
             emit(mode=mode, status="ok" if apply else "planned", action=action)
             return 0
@@ -213,10 +243,10 @@ def main(argv=None, *, home=None, uid=None, platform=None, versions=None, builde
         for name in names:
             path = os.path.join(cache_dir, name)
             _check_entry(path, uid)
-            if not _valid_fontlist(path):
-                emit(mode=mode, status="failed", action=action, reason="fontlist_invalid")
-                return 1
             os.chmod(path, 0o600)
+        if not _fontlists_ready(cache_dir, expected):
+            emit(mode=mode, status="failed", action=action, reason="fontlist_invalid")
+            return 1
         _write_stamp(cache_dir, v)
         emit(mode=mode, status="ok", action=action)
         return 0

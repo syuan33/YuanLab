@@ -24,6 +24,8 @@ CLJ_KONDO_URL="https://github.com/clj-kondo/clj-kondo/releases/download/v${CLJ_K
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FONT_CACHE_HELPER="${SCRIPT_DIR}/preseed_matplotlib_font_cache.py"
+# shellcheck source=preseed_font_cache_step.sh
+source "${SCRIPT_DIR}/preseed_font_cache_step.sh"
 
 CI_USER=""
 APPLY=0
@@ -91,6 +93,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$CI_USER" ] || die '--ci-user is required'
+[ "$REQUIRE_FONT_CACHE" -eq 0 ] || [ "$APPLY" -eq 1 ] || die '--require-font-cache requires --apply'
 [ "$(uname -s)" = "Darwin" ] || die 'this script supports macOS only'
 [ "$(uname -m)" = "arm64" ] || die 'this script supports Apple Silicon only'
 
@@ -304,20 +307,9 @@ PYTHON_CHECK="$(/usr/bin/sudo -u "$CI_USER" /usr/bin/env HOME="$CI_HOME" \
 # as the dedicated non-admin account with a clean environment and the managed Python in isolated mode; it never
 # prints paths or environment values. Matplotlib is installed by the repository dependency step, so on a brand-new
 # account this reports skipped_matplotlib_absent and must be rerun after the first dependency install.
-FONT_CACHE_REQUIRE_ARG=""
-[ "$REQUIRE_FONT_CACHE" -eq 1 ] && FONT_CACHE_REQUIRE_ARG="--require-matplotlib"
-set +e
-FONT_CACHE_OUTPUT="$(/usr/bin/sudo -u "$CI_USER" /usr/bin/env -i HOME="$CI_HOME" PATH=/usr/bin:/bin \
-  "${PYTHON_TOOLCACHE_ARCH}/python" -I - --apply ${FONT_CACHE_REQUIRE_ARG:+"$FONT_CACHE_REQUIRE_ARG"} <"$FONT_CACHE_HELPER" 2>/dev/null)"
-FONT_CACHE_RC=$?
-set -e
-[ "$FONT_CACHE_RC" -eq 0 ] || die "Matplotlib font-cache preseed failed: ${FONT_CACHE_OUTPUT:-no output}"
-FONT_CACHE_STATE="$(printf '%s\n' "$FONT_CACHE_OUTPUT" | /usr/bin/sed -n 's/.*status=\([a-z_]*\).*/\1/p' | /usr/bin/head -n 1)"
-[ -n "$FONT_CACHE_STATE" ] || die 'Matplotlib font-cache helper returned no status'
-if [ "$FONT_CACHE_STATE" = "skipped_matplotlib_absent" ]; then
-  printf 'WARNING: Matplotlib font cache NOT pre-built (Matplotlib is not installed for the managed Python yet).\n' >&2
-  printf '         Rerun with --apply --require-font-cache after the repository dependencies are installed.\n' >&2
-fi
+FONT_CACHE_RUN=(/usr/bin/sudo -u "$CI_USER" /usr/bin/env -i HOME="$CI_HOME" PATH=/usr/bin:/bin
+  "${PYTHON_TOOLCACHE_ARCH}/python" -I -)
+font_cache_step
 
 # Validate the already-seeded host prerequisites. setup-node/setup-java will select
 # their cache entries; the project-local shadow-cljs dependency remains owned by npm ci.

@@ -131,11 +131,14 @@ blocked canonical run, not yet measured on the CI account); pre-building it remo
 `scripts/preseed_matplotlib_font_cache.py` is run by `--apply` as the dedicated non-admin account, with a cleared environment and the
 managed Python in isolated mode (`env -i ... python -I -`, script read from stdin). It:
 
+- is executed through `scripts/preseed_font_cache_step.sh` (rc handling, status parsing, the skip WARNING and `--require-font-cache`
+  forwarding), which is exercised by tests with a stub helper;
 - uses the platform default cache location under the account's home and ignores `MPLCONFIGDIR`/`XDG_*` overrides, so a job that sets
   such an override will not benefit;
 - refuses (exit 2, nothing written) a symlinked cache directory, a non-directory, or any font-list/stamp entry that is a symlink, not a
   regular file, not owned by the account, or hardlinked (so mode repair can never change an unrelated file);
-- treats a font list that is not a parseable JSON object as stale and rebuilds it, and reports unexpected I/O errors as
+- treats the font list as fresh only when the file for the cache-format version Matplotlib expects (read from its source, without importing
+  it) exists with that `_version` and a non-empty `ttflist`; anything else is stale and rebuilt, and reports unexpected I/O errors as
   `status=failed reason=io_error` instead of a traceback;
 - creates the cache directory mode `0700` and font-list/stamp files mode `0600`, and restores those modes on a repeat run without
   rebuilding (`action=fix_mode`); the stamp is written through a uniquely named, exclusively created temporary file;
