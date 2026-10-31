@@ -4,6 +4,7 @@
 Run it with the managed (toolcache) Python as that account, with a clean environment:
     env -i HOME=<ci home> PATH=... <managed python> -I - [--apply] < preseed_matplotlib_font_cache.py
 
+--require-matplotlib turns "Matplotlib not installed yet" into a failure (exit 3) instead of a skip.
 Dry-run (default) imports nothing from Matplotlib and writes nothing. Output is fixed key=value fields only: no paths,
 no environment values.
 """
@@ -88,6 +89,24 @@ def _read_stamp(cache_dir):
         return None
 
 
+def _modes_private(cache_dir):
+    if stat.S_IMODE(os.lstat(cache_dir).st_mode) != 0o700:
+        return False
+    for name in _fontlists(cache_dir) + [STAMP_NAME]:
+        path = os.path.join(cache_dir, name)
+        if os.path.lexists(path) and stat.S_IMODE(os.lstat(path).st_mode) != 0o600:
+            return False
+    return True
+
+
+def _tighten(cache_dir):
+    os.chmod(cache_dir, 0o700)
+    for name in _fontlists(cache_dir) + [STAMP_NAME]:
+        path = os.path.join(cache_dir, name)
+        if os.path.lexists(path) and not os.path.islink(path):
+            os.chmod(path, 0o600)
+
+
 def _plan(cache_dir, exists, versions):
     if not exists:
         return "build"
@@ -95,16 +114,22 @@ def _plan(cache_dir, exists, versions):
     fresh = (stamp is not None and stamp.get("python") == versions["python"]
              and stamp.get("matplotlib") == versions["matplotlib"] and bool(_fontlists(cache_dir)))
     if fresh:
-        return "none"
+        return "none" if _modes_private(cache_dir) else "fix_mode"
     return "rebuild" if (stamp is not None or _fontlists(cache_dir)) else "build"
 
 
 def _write_stamp(cache_dir, versions):
-    tmp = os.path.join(cache_dir, STAMP_NAME + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        json.dump({"python": versions["python"], "matplotlib": versions["matplotlib"]}, fh, sort_keys=True)
-    os.replace(tmp, os.path.join(cache_dir, STAMP_NAME))
+    # Unique, exclusively-created temp name: never reuse (or truncate) a pre-existing file or hardlink.
+    tmp = os.path.join(cache_dir, "%s.%s.tmp" % (STAMP_NAME, os.urandom(8).hex()))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"python": versions["python"], "matplotlib": versions["matplotlib"]}, fh, sort_keys=True)
+        os.replace(tmp, os.path.join(cache_dir, STAMP_NAME))
+    except BaseException:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def main(argv=None, *, environ=None, home=None, uid=None, platform=None, versions=None, builder=None, stdout=None):
@@ -119,15 +144,19 @@ def main(argv=None, *, environ=None, home=None, uid=None, platform=None, version
     def emit(**fields):
         out.write(" ".join("%s=%s" % kv for kv in fields.items()) + "\n")
 
-    unknown = [a for a in argv if a not in ("--apply",)]
+    unknown = [a for a in argv if a not in ("--apply", "--require-matplotlib")]
     if unknown:
         emit(status="refused", reason="unknown_argument")
         return 2
     apply = "--apply" in argv
+    require = "--require-matplotlib" in argv
     mode = "apply" if apply else "dry-run"
 
     v = versions()
     if not v.get("matplotlib"):
+        if require:
+            emit(mode=mode, status="failed", reason="matplotlib_absent")
+            return 3
         emit(mode=mode, status="skipped_matplotlib_absent", action="none")
         return 0
 
@@ -140,6 +169,10 @@ def main(argv=None, *, environ=None, home=None, uid=None, platform=None, version
             return 0
         for key in SCRUB_ENV:
             os.environ.pop(key, None)
+        if action == "fix_mode":
+            _tighten(cache_dir)
+            emit(mode=mode, status="ok", action=action)
+            return 0
         if not exists:
             os.makedirs(cache_dir, mode=0o700)
         os.chmod(cache_dir, 0o700)

@@ -140,6 +140,49 @@ class ApplyTest(Base):
         self.assertEqual(stat.S_IMODE(self.cache.stat().st_mode), 0o700)
 
 
+class RepairRound1Test(Base):
+    def test_F16_loose_modes_with_valid_stamp_are_restored_without_rebuild(self):
+        self.run_helper("--apply")
+        fontlist = self.cache / "fontlist-v390.json"
+        os.chmod(self.cache, 0o777)
+        os.chmod(fontlist, 0o666)
+        rc, out = self.run_helper()
+        self.assertEqual(rc, 0)
+        self.assertIn("action=fix_mode", out)
+        self.assertEqual(stat.S_IMODE(self.cache.stat().st_mode), 0o777)  # dry-run must not touch
+        self.assertEqual(stat.S_IMODE(fontlist.stat().st_mode), 0o666)
+        n = len(self.builds)
+        rc, out = self.run_helper("--apply")
+        self.assertEqual(rc, 0)
+        self.assertIn("action=fix_mode", out)
+        self.assertEqual(len(self.builds), n)
+        self.assertEqual(stat.S_IMODE(self.cache.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(fontlist.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((self.cache / ".local-ci-font-cache-stamp.json").stat().st_mode), 0o600)
+        self.assertIn("action=none", self.run_helper("--apply")[1])
+
+    def test_F17_stamp_write_never_truncates_a_hardlinked_temp_and_leaves_no_temp(self):
+        self.run_helper("--apply")
+        victim = self.tmp / "victim.txt"
+        victim.write_text("keep")
+        os.link(victim, self.cache / ".local-ci-font-cache-stamp.json.tmp")
+        self.versions = {"python": "3.11.9", "matplotlib": "3.10.0"}
+        self.assertEqual(self.run_helper("--apply")[0], 0)
+        self.assertEqual(victim.read_text(), "keep")
+        leftovers = [n for n in os.listdir(self.cache) if ".tmp" in n and n != ".local-ci-font-cache-stamp.json.tmp"]
+        self.assertEqual(leftovers, [])
+
+    def test_F18_require_flag_turns_absent_matplotlib_into_a_failure(self):
+        absent = lambda: {"python": "3.11.9", "matplotlib": None}
+        before = snapshot(self.home)
+        rc, out = self.run_helper("--apply", "--require-matplotlib", versions=absent)
+        self.assertEqual(rc, 3)
+        self.assertIn("status=failed", out)
+        self.assertIn("reason=matplotlib_absent", out)
+        self.assertEqual(snapshot(self.home), before)
+        self.assertEqual(self.run_helper("--apply", versions=absent)[0], 0)
+
+
 class RefusalTest(Base):
     def test_F06_symlinked_cache_dir_is_refused(self):
         target = self.tmp / "elsewhere"
@@ -250,6 +293,11 @@ class PreseedScriptContractTest(TmpCase):
         gate = self.src.index('if [ "$APPLY" -ne 1 ]')
         self.assertEqual(self.src.count('<"$FONT_CACHE_HELPER"'), 1)
         self.assertGreater(self.src.index('<"$FONT_CACHE_HELPER"'), gate)
+
+    def test_S06_require_font_cache_flag_and_loud_skip_notice(self):
+        self.assertIn("--require-font-cache", self.src)
+        self.assertIn("--require-matplotlib", self.src)
+        self.assertIn("WARNING: Matplotlib font cache NOT pre-built", self.src)
 
     def test_S04_manifest_records_font_cache_status(self):
         self.assertIn("matplotlib_font_cache=", self.src)

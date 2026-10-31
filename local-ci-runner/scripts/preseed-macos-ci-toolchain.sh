@@ -27,16 +27,20 @@ FONT_CACHE_HELPER="${SCRIPT_DIR}/preseed_matplotlib_font_cache.py"
 
 CI_USER=""
 APPLY=0
+REQUIRE_FONT_CACHE=0
 TMP_DIR=""
 
 usage() {
   cat <<'EOF'
 Usage:
-  preseed-macos-ci-toolchain.sh --ci-user USER [--apply]
+  preseed-macos-ci-toolchain.sh --ci-user USER [--apply] [--require-font-cache]
 
 Without --apply, the script downloads and verifies the pinned assets and prints
 the planned persistent changes. With --apply, macOS asks for an administrator
 password and installs Python 3.11.9 for the dedicated non-admin CI account.
+
+--require-font-cache makes the run fail unless the Matplotlib font cache was actually pre-built (Matplotlib must already
+be installed for the managed Python; use it for the final pre-run preseed, after the repository dependencies exist).
 
 The script never starts/registers the runner or enables a GitHub workflow.
 EOF
@@ -70,6 +74,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --apply)
       APPLY=1
+      shift
+      ;;
+    --require-font-cache)
+      REQUIRE_FONT_CACHE=1
       shift
       ;;
     -h|--help)
@@ -296,14 +304,20 @@ PYTHON_CHECK="$(/usr/bin/sudo -u "$CI_USER" /usr/bin/env HOME="$CI_HOME" \
 # as the dedicated non-admin account with a clean environment and the managed Python in isolated mode; it never
 # prints paths or environment values. Matplotlib is installed by the repository dependency step, so on a brand-new
 # account this reports skipped_matplotlib_absent and must be rerun after the first dependency install.
+FONT_CACHE_REQUIRE_ARG=""
+[ "$REQUIRE_FONT_CACHE" -eq 1 ] && FONT_CACHE_REQUIRE_ARG="--require-matplotlib"
 set +e
 FONT_CACHE_OUTPUT="$(/usr/bin/sudo -u "$CI_USER" /usr/bin/env -i HOME="$CI_HOME" PATH=/usr/bin:/bin \
-  "${PYTHON_TOOLCACHE_ARCH}/python" -I - --apply <"$FONT_CACHE_HELPER" 2>/dev/null)"
+  "${PYTHON_TOOLCACHE_ARCH}/python" -I - --apply ${FONT_CACHE_REQUIRE_ARG:+"$FONT_CACHE_REQUIRE_ARG"} <"$FONT_CACHE_HELPER" 2>/dev/null)"
 FONT_CACHE_RC=$?
 set -e
 [ "$FONT_CACHE_RC" -eq 0 ] || die "Matplotlib font-cache preseed failed: ${FONT_CACHE_OUTPUT:-no output}"
 FONT_CACHE_STATE="$(printf '%s\n' "$FONT_CACHE_OUTPUT" | /usr/bin/sed -n 's/.*status=\([a-z_]*\).*/\1/p' | /usr/bin/head -n 1)"
 [ -n "$FONT_CACHE_STATE" ] || die 'Matplotlib font-cache helper returned no status'
+if [ "$FONT_CACHE_STATE" = "skipped_matplotlib_absent" ]; then
+  printf 'WARNING: Matplotlib font cache NOT pre-built (Matplotlib is not installed for the managed Python yet).\n' >&2
+  printf '         Rerun with --apply --require-font-cache after the repository dependencies are installed.\n' >&2
+fi
 
 # Validate the already-seeded host prerequisites. setup-node/setup-java will select
 # their cache entries; the project-local shadow-cljs dependency remains owned by npm ci.
