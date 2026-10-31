@@ -207,7 +207,7 @@ printf '  - give the dedicated non-admin account ownership of Python.framework 3
 printf '  - verify existing Node 22 and Java 21 caches\n'
 printf '  - checksum and execute clj-kondo %s from a temporary directory only\n' "$CLJ_KONDO_VERSION"
 printf '  - pre-build the Matplotlib font cache with the managed Python, only if Matplotlib is already installed there\n'
-printf '    (private mode-0700 cache owned by the CI account; rebuilt only when the Python/Matplotlib version changes)\n'
+printf '    (private mode-0700 cache owned by the CI account; rebuilt only when stale: version change, missing/corrupt stamp or unusable font list)\n'
 printf '  - do NOT install Clojure/shadow-cljs globally (the repository uses npm ci)\n'
 printf '  - do NOT start/register the runner or change any GitHub workflow\n'
 
@@ -303,7 +303,7 @@ PYTHON_CHECK="$(/usr/bin/sudo -u "$CI_USER" /usr/bin/env HOME="$CI_HOME" \
   "${PYTHON_TOOLCACHE_ARCH}/python" -c 'import platform, ssl, pip; print(platform.python_version())')"
 [ "$PYTHON_CHECK" = "$PYTHON_VERSION" ] || die 'Python toolcache validation failed'
 
-# Matplotlib font cache: a cold cache makes the first backend start exceed its readiness window. The helper runs
+# Matplotlib font cache: a cold cache is the suspected cause of a first backend start exceeding its readiness window. The helper runs
 # as the dedicated non-admin account with a clean environment and the managed Python in isolated mode; it never
 # prints paths or environment values. Matplotlib is installed by the repository dependency step, so on a brand-new
 # account this reports skipped_matplotlib_absent and must be rerun after the first dependency install.

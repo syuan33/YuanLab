@@ -5,7 +5,8 @@
 # FONT_CACHE_RUN (array: the command prefix that runs the managed Python in isolated mode as the CI account, reading the
 # helper from stdin), and a die() function. Output: FONT_CACHE_STATE (the helper's status field).
 #
-# The helper's stderr is discarded and only its fixed key=value stdout is ever shown: no paths, no environment values.
+# The helper's stderr is discarded and only a single line matching the fixed key=value grammar is ever parsed or shown
+# (no paths, no environment values); a helper failure (rc != 0) is fatal to the preseed, a skip is not.
 
 font_cache_step() {
   local require_args=() rc out
@@ -16,6 +17,8 @@ font_cache_step() {
   out="$("${FONT_CACHE_RUN[@]}" --apply ${require_args[@]+"${require_args[@]}"} <"$FONT_CACHE_HELPER" 2>/dev/null)"
   rc=$?
   set -e
+  # Trust nothing but the helper's own fixed-field line: the process runs third-party code, so any other stdout is dropped.
+  out="$(printf '%s\n' "$out" | /usr/bin/grep -E '^(mode=[a-z-]+ )?status=[a-z_]+( action=[a-z_]+)?( reason=[a-z_]+)?$' | /usr/bin/tail -n 1 || true)"
   [ "$rc" -eq 0 ] || die "Matplotlib font-cache preseed failed: ${out:-no output}"
   FONT_CACHE_STATE="$(printf '%s\n' "$out" | /usr/bin/sed -n 's/.*status=\([a-z_]*\).*/\1/p' | /usr/bin/head -n 1)"
   [ -n "$FONT_CACHE_STATE" ] || die 'Matplotlib font-cache helper returned no status'

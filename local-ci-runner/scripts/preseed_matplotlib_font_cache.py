@@ -10,6 +10,7 @@ no environment values.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import stat
@@ -112,7 +113,7 @@ def _usable_fontlist(path, expected):
         return False
     if not isinstance(data, dict) or not isinstance(data.get("_version"), int):
         return False
-    if expected is not None and data["_version"] != expected:
+    if data["_version"] != expected:
         return False
     tt = data.get("ttflist")
     if not isinstance(tt, list) or not tt:
@@ -239,7 +240,9 @@ def main(argv=None, *, fontlist_version=None, home=None, uid=None, platform=None
         for name in _fontlists(cache_dir):
             os.unlink(os.path.join(cache_dir, name))
         try:
-            builder(cache_dir)
+            # Importing Matplotlib may print arbitrary text (paths, warnings); nothing but our own fixed fields may reach stdout.
+            with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                builder(cache_dir)
         except Refused:
             raise
         except Exception:

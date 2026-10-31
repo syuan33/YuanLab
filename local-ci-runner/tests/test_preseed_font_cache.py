@@ -187,6 +187,31 @@ class RepairRound1Test(Base):
         self.assertEqual(self.run_helper("--apply", versions=absent)[0], 0)
 
 
+class RepairRound5Test(Base):
+    def test_F37_builder_stdout_never_reaches_the_process_stdout(self):
+        import contextlib
+        def chatty(cache_dir):
+            print("LEAK-/some/private/path SECRET")
+            self.builder(cache_dir)
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink):
+            rc, out = self.run_helper("--apply", builder=chatty)
+        self.assertEqual(rc, 0)
+        self.assertEqual(sink.getvalue(), "")
+        self.assertNotIn("LEAK", out)
+
+    def test_F38_stdout_is_restored_after_a_failing_builder(self):
+        import contextlib, sys
+        def boom(cache_dir):
+            print("LEAK")
+            raise RuntimeError("x")
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink):
+            before = sys.stdout
+            self.run_helper("--apply", builder=boom)
+            self.assertIs(sys.stdout, before)
+
+
 class RepairRound4Test(Base):
     def test_F32_malformed_font_entries_are_not_usable(self):
         self.run_helper("--apply")
@@ -350,6 +375,20 @@ class StepHarnessTest(TmpCase):
         r = self.run_step(self.ARGV_STUB, True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("STATE:strict_apply", r.stdout)
+
+    def test_H07_only_fixed_field_lines_are_ever_shown_or_parsed(self):
+        r = self.run_step('print("LEAK /private/path SECRET=abc")\nprint("status=failed reason=build_error")\n'
+                          'print("status=ok LEAK-after")\nraise SystemExit(1)\n', False)
+        self.assertEqual(r.returncode, 9)
+        self.assertNotIn("LEAK", r.stdout + r.stderr)
+        self.assertNotIn("SECRET", r.stdout + r.stderr)
+        self.assertIn("reason=build_error", r.stdout)
+
+    def test_H08_garbage_only_output_is_not_echoed(self):
+        r = self.run_step('print("LEAK /private/path")\nraise SystemExit(1)\n', False)
+        self.assertEqual(r.returncode, 9)
+        self.assertNotIn("LEAK", r.stdout + r.stderr)
+        self.assertIn("no output", r.stdout)
 
     def test_H06_version_unknown_skip_also_warns(self):
         r = self.run_step('print("mode=apply status=skipped_font_cache_version_unknown action=none")\n', False)
