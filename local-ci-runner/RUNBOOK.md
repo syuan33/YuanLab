@@ -148,6 +148,9 @@ managed Python in isolated mode (`env -i ... python -I -`, script read from stdi
 - records the Python and Matplotlib versions in a stamp file and rebuilds only when either changes (or the stamp is missing/corrupt);
   it deletes only `fontlist-v*.json` files and the stamp, and removes the stamp before building so a failed build is retried;
 - is idempotent: a repeat run with an unchanged stamp does nothing;
+- under `--apply`, additionally asks Matplotlib itself (its own `json_load` plus the cache-format version check) whether the existing or
+  freshly built font list is loadable; a rejection triggers a rebuild, and a list that Matplotlib rewrites while being imported for that check
+  is reported as `action=rebuild`. Dry-run cannot import Matplotlib, so its verdict is the structural check only;
 - swallows anything Matplotlib prints while building, and the shell step parses/shows only one line that matches the fixed grammar;
   a helper failure (exit != 0) aborts the preseed after the Python install, while a skip does not;
 - prints fixed `key=value` fields only (never paths or environment values); without `--apply` it imports no Matplotlib and writes nothing.

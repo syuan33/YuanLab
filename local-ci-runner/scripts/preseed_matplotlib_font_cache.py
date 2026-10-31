@@ -48,9 +48,24 @@ def _real_builder(cache_dir):
     import matplotlib
     if os.path.realpath(matplotlib.get_cachedir()) != os.path.realpath(cache_dir):
         raise Refused("cache_dir_mismatch")
-    if "matplotlib.font_manager" in sys.modules:
-        raise RuntimeError("font_manager already imported")
+    if "matplotlib.font_manager" in sys.modules:  # e.g. already imported by the verifier: force a rewrite
+        sys.modules["matplotlib.font_manager"]._load_fontmanager(try_read_cache=False)
+        return
     import matplotlib.font_manager  # noqa: F401  (import builds fontlist-v*.json when absent)
+
+
+def _real_verifier(cache_dir, expected):
+    """Ask Matplotlib itself whether the cache it will use is loadable and of the current format."""
+    try:
+        import matplotlib
+        if os.path.realpath(matplotlib.get_cachedir()) != os.path.realpath(cache_dir):
+            return False
+        import matplotlib.font_manager as fm
+        loaded = fm.json_load(os.path.join(cache_dir, "%s%d%s" % (FONTLIST_GLOB_PREFIX, expected, FONTLIST_GLOB_SUFFIX)))
+        return (getattr(loaded, "_version", None) == fm.FontManager.__version__ == expected
+                and len(getattr(loaded, "ttflist", [])) > 0)
+    except Exception:
+        return False
 
 
 def _fontlists(cache_dir):
@@ -165,6 +180,14 @@ def _plan(cache_dir, exists, versions, expected):
     return "rebuild" if (stamp is not None or _fontlists(cache_dir)) else "build"
 
 
+def _fingerprint(path):
+    try:
+        st = os.lstat(path)
+        return (st.st_size, st.st_mtime_ns, st.st_ino)
+    except OSError:
+        return None
+
+
 def _write_stamp(cache_dir, versions):
     # Unique, exclusively-created temp name: never reuse (or truncate) a pre-existing file or hardlink.
     tmp = os.path.join(cache_dir, "%s.%s.tmp" % (STAMP_NAME, os.urandom(8).hex()))
@@ -179,7 +202,7 @@ def _write_stamp(cache_dir, versions):
         raise
 
 
-def main(argv=None, *, fontlist_version=None, home=None, uid=None, platform=None, versions=None, builder=None, stdout=None):
+def main(argv=None, *, fontlist_version=None, verifier=None, home=None, uid=None, platform=None, versions=None, builder=None, stdout=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     out = sys.stdout if stdout is None else stdout
     home = os.path.expanduser("~") if home is None else home
@@ -188,6 +211,7 @@ def main(argv=None, *, fontlist_version=None, home=None, uid=None, platform=None
     versions = _real_versions if versions is None else versions
     builder = _real_builder if builder is None else builder
     fontlist_version = _real_fontlist_version if fontlist_version is None else fontlist_version
+    verifier = _real_verifier if verifier is None else verifier
 
     def emit(**fields):
         out.write(" ".join("%s=%s" % kv for kv in fields.items()) + "\n")
@@ -222,15 +246,29 @@ def main(argv=None, *, fontlist_version=None, home=None, uid=None, platform=None
     try:
         exists = _check_cache_dir(cache_dir, uid)
         action = _plan(cache_dir, exists, v, expected)
-        if not apply or action == "none":
-            emit(mode=mode, status="ok" if apply else "planned", action=action)
+        if not apply:
+            emit(mode=mode, status="planned", action=action)
             return 0
         for key in SCRUB_ENV:
             os.environ.pop(key, None)
-        if action == "fix_mode":
-            _tighten(cache_dir)
-            emit(mode=mode, status="ok", action=action)
-            return 0
+
+        def verify():
+            # Matplotlib is the authority on its own cache; dry-run never gets here (it must not import Matplotlib).
+            try:
+                with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                    return bool(verifier(cache_dir, expected))
+            except Exception:
+                return False
+
+        if action in ("none", "fix_mode"):
+            current = os.path.join(cache_dir, "%s%d%s" % (FONTLIST_GLOB_PREFIX, expected, FONTLIST_GLOB_SUFFIX))
+            before = _fingerprint(current)
+            if verify():
+                _tighten(cache_dir)  # verification may have let Matplotlib touch the cache; keep it private
+                # Matplotlib rewrites a list it cannot load while being imported for verification: report that as a rebuild.
+                emit(mode=mode, status="ok", action="rebuild" if _fingerprint(current) != before else action)
+                return 0
+            action = "rebuild"
         if not exists:
             os.makedirs(cache_dir, mode=0o700)
         os.chmod(cache_dir, 0o700)
@@ -256,9 +294,10 @@ def main(argv=None, *, fontlist_version=None, home=None, uid=None, platform=None
             path = os.path.join(cache_dir, name)
             _check_entry(path, uid)
             os.chmod(path, 0o600)
-        if not _fontlists_ready(cache_dir, expected):
+        if not _fontlists_ready(cache_dir, expected) or not verify():
             emit(mode=mode, status="failed", action=action, reason="fontlist_invalid")
             return 1
+        _tighten(cache_dir)
         _write_stamp(cache_dir, v)
         emit(mode=mode, status="ok", action=action)
         return 0

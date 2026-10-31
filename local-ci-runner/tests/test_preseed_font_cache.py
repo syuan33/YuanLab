@@ -46,7 +46,7 @@ class Base(TmpCase):
         self.env_seen.append(dict(os.environ))
         (Path(cache_dir) / "fontlist-v390.json").write_text(json.dumps(GOOD_FONTLIST))
 
-    def run_helper(self, *argv, versions="default", builder="default", uid=None, fontlist_version=lambda: 390):
+    def run_helper(self, *argv, versions="default", builder="default", uid=None, fontlist_version=lambda: 390, verifier="default"):
         out = io.StringIO()
         rc = self.h.main(
             list(argv),
@@ -54,6 +54,7 @@ class Base(TmpCase):
             uid=os.getuid() if uid is None else uid,
             platform="darwin",
             fontlist_version=fontlist_version,
+            verifier=(lambda cache_dir, expected: True) if verifier == "default" else verifier,
             versions=(lambda: dict(self.versions)) if versions == "default" else versions,
             builder=self.builder if builder == "default" else builder,
             stdout=out,
@@ -185,6 +186,118 @@ class RepairRound1Test(Base):
         self.assertIn("reason=matplotlib_absent", out)
         self.assertEqual(snapshot(self.home), before)
         self.assertEqual(self.run_helper("--apply", versions=absent)[0], 0)
+
+
+class RepairRound6Test(Base):
+    def test_F39_apply_asks_matplotlib_to_verify_an_existing_cache_and_rebuilds_when_it_refuses(self):
+        self.run_helper("--apply")
+        calls = []
+        def reject(cache_dir, expected):
+            calls.append((os.path.basename(cache_dir), expected))
+            return False
+        n = len(self.builds)
+        rc, out = self.run_helper("--apply", verifier=reject)
+        self.assertEqual(rc, 1, out)  # rebuilt, but the fresh build is rejected too -> fail, no stamp refresh
+        self.assertIn("action=rebuild", out)
+        self.assertEqual(len(self.builds), n + 1)
+        self.assertEqual(calls[0][1], 390)
+        self.assertGreaterEqual(len(calls), 2)  # once on the existing cache, once on the rebuilt one
+
+    def test_F40_verifier_accepting_keeps_the_noop(self):
+        self.run_helper("--apply")
+        seen = []
+        n = len(self.builds)
+        rc, out = self.run_helper("--apply", verifier=lambda c, e: seen.append(e) or True)
+        self.assertEqual(rc, 0)
+        self.assertIn("action=none", out)
+        self.assertEqual((len(self.builds), seen), (n, [390]))
+
+    def test_F41_dry_run_never_calls_the_verifier_or_matplotlib(self):
+        self.run_helper("--apply")
+        def forbidden(cache_dir, expected):
+            raise AssertionError("verifier must not run in dry-run")
+        rc, out = self.run_helper(verifier=forbidden)
+        self.assertEqual(rc, 0)
+        self.assertIn("action=none", out)
+
+    def test_F42_verifier_exception_counts_as_rejection_and_stdout_is_swallowed(self):
+        import contextlib
+        self.run_helper("--apply")
+        def explode(cache_dir, expected):
+            print("LEAK /private/path")
+            raise ValueError("bad")
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink):
+            rc, out = self.run_helper("--apply", verifier=explode)
+        self.assertEqual(sink.getvalue(), "")
+        self.assertEqual(rc, 1)
+        self.assertIn("reason=fontlist_invalid", out)
+        self.assertNotIn("LEAK", out)
+
+    def test_F43_post_build_rejection_leaves_no_stamp(self):
+        rc, out = self.run_helper("--apply", verifier=lambda c, e: False)
+        self.assertEqual(rc, 1)
+        self.assertIn("reason=fontlist_invalid", out)
+        self.assertFalse((self.cache / ".local-ci-font-cache-stamp.json").exists())
+
+    def test_F44_real_verifier_rejects_a_cache_dir_matplotlib_would_not_use(self):
+        import sys, types
+        fake = types.ModuleType("matplotlib")
+        fake.get_cachedir = lambda: str(self.tmp / "elsewhere")
+        saved = {k: sys.modules.get(k) for k in ("matplotlib", "matplotlib.font_manager")}
+        sys.modules["matplotlib"] = fake
+        sys.modules.pop("matplotlib.font_manager", None)
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+        self.addCleanup(restore)
+        self.assertFalse(self.h._real_verifier(str(self.cache), 390))
+
+    def test_F45_builder_stderr_is_swallowed_too(self):
+        import contextlib
+        def noisy(cache_dir):
+            import sys
+            print("LEAK", file=sys.stderr)
+            self.builder(cache_dir)
+        sink = io.StringIO()
+        with contextlib.redirect_stderr(sink):
+            rc, _ = self.run_helper("--apply", builder=noisy)
+        self.assertEqual((rc, sink.getvalue()), (0, ""))
+
+
+    def test_F47_a_verification_that_makes_matplotlib_rewrite_the_cache_is_reported_as_rebuild(self):
+        self.run_helper("--apply")
+        fontlist = self.cache / "fontlist-v390.json"
+        def heals(cache_dir, expected):
+            fontlist.write_text(json.dumps(dict(GOOD_FONTLIST, default_size=11.0)))  # what Matplotlib's import does to a bad list
+            return True
+        rc, out = self.run_helper("--apply", verifier=heals)
+        self.assertEqual(rc, 0)
+        self.assertIn("action=rebuild", out)
+        self.assertEqual(stat.S_IMODE(fontlist.stat().st_mode), 0o600)
+
+    def test_F46_real_builder_forces_a_rewrite_when_font_manager_is_already_imported(self):
+        import sys, types
+        calls = []
+        fake = types.ModuleType("matplotlib")
+        fake.get_cachedir = lambda: str(self.cache)
+        fm = types.ModuleType("matplotlib.font_manager")
+        fm._load_fontmanager = lambda **kw: calls.append(kw)
+        saved = {k: sys.modules.get(k) for k in ("matplotlib", "matplotlib.font_manager")}
+        sys.modules["matplotlib"], sys.modules["matplotlib.font_manager"] = fake, fm
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+        self.addCleanup(restore)
+        self.cache.mkdir()
+        self.h._real_builder(str(self.cache))
+        self.assertEqual(calls, [{"try_read_cache": False}])
 
 
 class RepairRound5Test(Base):
@@ -572,7 +685,7 @@ class HygieneTest(Base):
 
     def test_F15_linux_default_cache_dir_is_xdg_style(self):
         out = io.StringIO()
-        rc = self.h.main(["--apply"], home=str(self.home), uid=os.getuid(), platform="linux", fontlist_version=lambda: 390,
+        rc = self.h.main(["--apply"], home=str(self.home), uid=os.getuid(), platform="linux", fontlist_version=lambda: 390, verifier=lambda c, e: True,
                          versions=lambda: dict(self.versions), builder=self.builder, stdout=out)
         self.assertEqual(rc, 0)
         self.assertTrue((self.home / ".cache" / "matplotlib" / "fontlist-v390.json").exists())
