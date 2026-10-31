@@ -121,7 +121,27 @@ installed globally as a workaround.
 - validates Python, SSL and pip as the dedicated account;
 - verifies existing Node 22/Java 21 caches, or explicitly defers their first population to pinned setup actions;
 - checksum-verifies clj-kondo in a temporary directory and records a mode-0600, non-secret preseed manifest;
+- pre-builds the Matplotlib font cache for the managed Python (see below);
 - never starts/registers the runner, requests a GitHub token, changes a workflow, installs repository dependencies or runs repository code.
+
+### Matplotlib font cache
+
+A cold Matplotlib font cache makes the first import of a Matplotlib-using service slow enough to miss a short readiness window.
+`scripts/preseed_matplotlib_font_cache.py` is run by `--apply` as the dedicated non-admin account, with a cleared environment and the
+managed Python in isolated mode (`env -i ... python -I -`, script read from stdin). It:
+
+- uses the platform default cache location under the account's home and ignores `MPLCONFIGDIR`/`XDG_*` overrides, so a job that sets
+  such an override will not benefit;
+- refuses (exit 2, nothing written) a symlinked cache directory or font-list entry, a non-directory, or anything not owned by the account;
+- creates the cache directory mode `0700` and font-list/stamp files mode `0600`;
+- records the Python and Matplotlib versions in a stamp file and rebuilds only when either changes (or the stamp is missing/corrupt);
+  it deletes only `fontlist-v*.json` files and the stamp, and removes the stamp before building so a failed build is retried;
+- is idempotent: a repeat run with an unchanged stamp does nothing;
+- prints fixed `key=value` fields only (never paths or environment values); without `--apply` it imports no Matplotlib and writes nothing.
+
+Matplotlib is installed by the repository's dependency step, not by this script. On a brand-new account the helper therefore reports
+`skipped_matplotlib_absent` (not a failure); rerun `--apply` after the first dependency install. The manifest records the result as
+`matplotlib_font_cache=<status>`.
 
 ### Recovery and verification
 

@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Idempotently pre-build the Matplotlib font cache for the dedicated, non-admin CI account.
+
+Run it with the managed (toolcache) Python as that account, with a clean environment:
+    env -i HOME=<ci home> PATH=... <managed python> -I - [--apply] < preseed_matplotlib_font_cache.py
+
+Dry-run (default) imports nothing from Matplotlib and writes nothing. Output is fixed key=value fields only: no paths,
+no environment values.
+"""
+from __future__ import annotations
+
+import json
+import os
+import stat
+import sys
+
+STAMP_NAME = ".local-ci-font-cache-stamp.json"
+FONTLIST_GLOB_PREFIX = "fontlist-v"
+FONTLIST_GLOB_SUFFIX = ".json"
+SCRUB_ENV = ("MPLCONFIGDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME")
+
+
+class Refused(Exception):
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def default_cache_dir(home, platform):
+    if platform.startswith(("linux", "freebsd")):
+        return os.path.join(home, ".cache", "matplotlib")
+    return os.path.join(home, ".matplotlib")
+
+
+def _real_versions():
+    import platform
+    try:
+        from importlib import metadata
+        mpl = metadata.version("matplotlib")
+    except Exception:
+        mpl = None
+    return {"python": platform.python_version(), "matplotlib": mpl}
+
+
+def _real_builder(cache_dir):
+    import matplotlib
+    if os.path.realpath(matplotlib.get_cachedir()) != os.path.realpath(cache_dir):
+        raise Refused("cache_dir_mismatch")
+    if "matplotlib.font_manager" in sys.modules:
+        raise RuntimeError("font_manager already imported")
+    import matplotlib.font_manager  # noqa: F401  (import builds fontlist-v*.json when absent)
+
+
+def _fontlists(cache_dir):
+    return sorted(n for n in os.listdir(cache_dir)
+                  if n.startswith(FONTLIST_GLOB_PREFIX) and n.endswith(FONTLIST_GLOB_SUFFIX))
+
+
+def _check_cache_dir(cache_dir, uid):
+    try:
+        st = os.lstat(cache_dir)
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(st.st_mode):
+        raise Refused("cache_dir_is_symlink")
+    if not stat.S_ISDIR(st.st_mode):
+        raise Refused("cache_dir_not_directory")
+    if st.st_uid != uid:
+        raise Refused("cache_dir_not_owned")
+    for name in _fontlists(cache_dir):
+        entry = os.lstat(os.path.join(cache_dir, name))
+        if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
+            raise Refused("cache_entry_is_symlink")
+        if entry.st_uid != uid:
+            raise Refused("cache_entry_not_owned")
+    stamp = os.path.join(cache_dir, STAMP_NAME)
+    if os.path.lexists(stamp) and os.path.islink(stamp):
+        raise Refused("cache_entry_is_symlink")
+    return True
+
+
+def _read_stamp(cache_dir):
+    try:
+        with open(os.path.join(cache_dir, STAMP_NAME)) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _plan(cache_dir, exists, versions):
+    if not exists:
+        return "build"
+    stamp = _read_stamp(cache_dir)
+    fresh = (stamp is not None and stamp.get("python") == versions["python"]
+             and stamp.get("matplotlib") == versions["matplotlib"] and bool(_fontlists(cache_dir)))
+    if fresh:
+        return "none"
+    return "rebuild" if (stamp is not None or _fontlists(cache_dir)) else "build"
+
+
+def _write_stamp(cache_dir, versions):
+    tmp = os.path.join(cache_dir, STAMP_NAME + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"python": versions["python"], "matplotlib": versions["matplotlib"]}, fh, sort_keys=True)
+    os.replace(tmp, os.path.join(cache_dir, STAMP_NAME))
+
+
+def main(argv=None, *, environ=None, home=None, uid=None, platform=None, versions=None, builder=None, stdout=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    out = sys.stdout if stdout is None else stdout
+    home = os.path.expanduser("~") if home is None else home
+    uid = os.getuid() if uid is None else uid
+    platform = sys.platform if platform is None else platform
+    versions = _real_versions if versions is None else versions
+    builder = _real_builder if builder is None else builder
+
+    def emit(**fields):
+        out.write(" ".join("%s=%s" % kv for kv in fields.items()) + "\n")
+
+    unknown = [a for a in argv if a not in ("--apply",)]
+    if unknown:
+        emit(status="refused", reason="unknown_argument")
+        return 2
+    apply = "--apply" in argv
+    mode = "apply" if apply else "dry-run"
+
+    v = versions()
+    if not v.get("matplotlib"):
+        emit(mode=mode, status="skipped_matplotlib_absent", action="none")
+        return 0
+
+    cache_dir = default_cache_dir(home, platform)
+    try:
+        exists = _check_cache_dir(cache_dir, uid)
+        action = _plan(cache_dir, exists, v)
+        if not apply or action == "none":
+            emit(mode=mode, status="ok" if apply else "planned", action=action)
+            return 0
+        for key in SCRUB_ENV:
+            os.environ.pop(key, None)
+        if not exists:
+            os.makedirs(cache_dir, mode=0o700)
+        os.chmod(cache_dir, 0o700)
+        stamp = os.path.join(cache_dir, STAMP_NAME)
+        if os.path.lexists(stamp):
+            os.unlink(stamp)
+        for name in _fontlists(cache_dir):
+            os.unlink(os.path.join(cache_dir, name))
+        try:
+            builder(cache_dir)
+        except Refused:
+            raise
+        except Exception:
+            emit(mode=mode, status="failed", action=action, reason="build_error")
+            return 1
+        names = _fontlists(cache_dir)
+        if not names:
+            emit(mode=mode, status="failed", action=action, reason="no_fontlist_produced")
+            return 1
+        for name in names:
+            path = os.path.join(cache_dir, name)
+            if os.path.islink(path):
+                raise Refused("cache_entry_is_symlink")
+            os.chmod(path, 0o600)
+        _write_stamp(cache_dir, v)
+        emit(mode=mode, status="ok", action=action)
+        return 0
+    except Refused as exc:
+        emit(mode=mode, status="refused", reason=exc.reason)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -22,6 +22,9 @@ CLJ_KONDO_VERSION="2026.01.19"
 CLJ_KONDO_SHA256="911f3803be075d59172cb92f0d39aea077fc7550dcdc4e8c946d61552fa51a12"
 CLJ_KONDO_URL="https://github.com/clj-kondo/clj-kondo/releases/download/v${CLJ_KONDO_VERSION}/clj-kondo-${CLJ_KONDO_VERSION}-macos-aarch64.zip"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FONT_CACHE_HELPER="${SCRIPT_DIR}/preseed_matplotlib_font_cache.py"
+
 CI_USER=""
 APPLY=0
 TMP_DIR=""
@@ -87,6 +90,7 @@ for tool in curl dscl dseditgroup id mktemp ps python3 shasum sudo tar unzip; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
 done
 
+[ -f "$FONT_CACHE_HELPER" ] || die 'Matplotlib font-cache helper is missing next to this script'
 id "$CI_USER" >/dev/null 2>&1 || die 'dedicated CI account does not exist'
 CI_UID="$(id -u "$CI_USER")"
 CI_GROUP="$(id -gn "$CI_USER")"
@@ -191,6 +195,8 @@ printf '  - create setup-python toolcache entry under the managed runner work di
 printf '  - give the dedicated non-admin account ownership of Python.framework 3.11 only\n'
 printf '  - verify existing Node 22 and Java 21 caches\n'
 printf '  - checksum and execute clj-kondo %s from a temporary directory only\n' "$CLJ_KONDO_VERSION"
+printf '  - pre-build the Matplotlib font cache with the managed Python, only if Matplotlib is already installed there\n'
+printf '    (private mode-0700 cache owned by the CI account; rebuilt only when the Python/Matplotlib version changes)\n'
 printf '  - do NOT install Clojure/shadow-cljs globally (the repository uses npm ci)\n'
 printf '  - do NOT start/register the runner or change any GitHub workflow\n'
 
@@ -286,6 +292,19 @@ PYTHON_CHECK="$(/usr/bin/sudo -u "$CI_USER" /usr/bin/env HOME="$CI_HOME" \
   "${PYTHON_TOOLCACHE_ARCH}/python" -c 'import platform, ssl, pip; print(platform.python_version())')"
 [ "$PYTHON_CHECK" = "$PYTHON_VERSION" ] || die 'Python toolcache validation failed'
 
+# Matplotlib font cache: a cold cache makes the first backend start exceed its readiness window. The helper runs
+# as the dedicated non-admin account with a clean environment and the managed Python in isolated mode; it never
+# prints paths or environment values. Matplotlib is installed by the repository dependency step, so on a brand-new
+# account this reports skipped_matplotlib_absent and must be rerun after the first dependency install.
+set +e
+FONT_CACHE_OUTPUT="$(/usr/bin/sudo -u "$CI_USER" /usr/bin/env -i HOME="$CI_HOME" PATH=/usr/bin:/bin \
+  "${PYTHON_TOOLCACHE_ARCH}/python" -I - --apply <"$FONT_CACHE_HELPER" 2>/dev/null)"
+FONT_CACHE_RC=$?
+set -e
+[ "$FONT_CACHE_RC" -eq 0 ] || die "Matplotlib font-cache preseed failed: ${FONT_CACHE_OUTPUT:-no output}"
+FONT_CACHE_STATE="$(printf '%s\n' "$FONT_CACHE_OUTPUT" | /usr/bin/sed -n 's/.*status=\([a-z_]*\).*/\1/p' | /usr/bin/head -n 1)"
+[ -n "$FONT_CACHE_STATE" ] || die 'Matplotlib font-cache helper returned no status'
+
 # Validate the already-seeded host prerequisites. setup-node/setup-java will select
 # their cache entries; the project-local shadow-cljs dependency remains owned by npm ci.
 NODE_STATUS="deferred_to_setup-node"
@@ -332,6 +351,7 @@ python_pkg_sha256=${PYTHON_PKG_SHA256}
 toolcache_marker=${PYTHON_TOOLCACHE_VERSION}/arm64.complete
 node_status=${NODE_STATUS}
 java_status=${JAVA_STATUS}
+matplotlib_font_cache=${FONT_CACHE_STATE}
 clj_kondo_version=${CLJ_KONDO_VERSION}
 clj_kondo_sha256=${CLJ_KONDO_SHA256}
 runner_started=false
@@ -341,6 +361,7 @@ EOF
 
 printf '\nTOOLCHAIN PRESEED PASSED\n'
 printf '  Python: %s (setup-python cache complete)\n' "$PYTHON_VERSION"
+printf '  Matplotlib font cache: %s\n' "$FONT_CACHE_STATE"
 printf '  Node:   %s\n' "$NODE_STATUS"
 printf '  Java:   %s\n' "$JAVA_STATUS"
 printf '  CLJS:   host preflight passed; project dependencies remain npm-ci managed\n'
