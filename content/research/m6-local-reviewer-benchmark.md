@@ -41,8 +41,8 @@ static memory cap was 29 GB; the dynamic ceiling moved between 24.3 and 26.9 GB 
 
 | Label | Model | Quantization | Resident | Server |
 |---|---|---|---|---|
-| Qwen3.7 dense | Qwen3.7 27B, dense | 4-bit, with a draft model | ~23.6 GB (whole box) | mlx-dspark |
-| Qwen3.8-27B | Qwen3.8 27B, dense | `oQ4e`, multi-token prediction | 18.4 GB | oMLX |
+| Qwen3.8 Q4 (mlx-dspark) | Qwen3.8 27B, dense | 4-bit, with a DFlash draft model | ~23.6 GB (whole box) | mlx-dspark |
+| Qwen3.8 oQ4e (oMLX) | Qwen3.8 27B, dense | `oQ4e`, multi-token prediction | 18.4 GB | oMLX |
 | Ornith oQ4e | Ornith 1.5 35B-A3B, mixture of experts | `oQ4e`, multi-token prediction | 22.65 GB | oMLX |
 | Ornith oQ3e | Ornith 1.5 35B-A3B, mixture of experts | `oQ3e`, multi-token prediction | 17.4 GB | oMLX |
 
@@ -81,18 +81,18 @@ reduction was legitimate de-duplication and how many were dropped findings was n
 
 ### 4.1 Speed, memory and request size
 
-| | Qwen3.7 dense | Qwen3.8-27B oQ4e | Ornith oQ4e | Ornith oQ3e |
+| | Qwen3.8 Q4 (mlx-dspark) | Qwen3.8 oQ4e (oMLX) | Ornith oQ4e | Ornith oQ3e |
 |---|---|---|---|---|
 | Prefill tok/s | 157-235 | ~250-280 | ~1,200 | 660-1,840 (falls with length) |
 | Decode tok/s | 3.4-13.8 | 18-21 | 68-87 | 18-79 (falls with length) |
 | Largest request that ran | 132k, one shot | ~42k one shot; 30k chunks | ~19k chunks (30k aborted) | 132k one shot |
 | 135k package | not chunked | 6 chunks + merge, ~15.5 min | 10 chunks + merge, ~6.4 min | 4.3-5.3 min, any chunking |
 
-For the dense Qwen3.7, decode falls from 13.6 tok/s at 45k tokens to 3.4 tok/s at 132k, so a 600-second deadline
+For the Qwen3.8 Q4 build on mlx-dspark, decode falls from 13.6 tok/s at 45k tokens to 3.4 tok/s at 132k, so a 600-second deadline
 that suits 40k-token prompts fails above roughly 80k tokens ([Figure 3](#fig-decode)).
 
 {{< fig name="fig-decode" >}}
-**Figure 3.** Decode speed against prompt length, dense Qwen3.7 27B, eight real runs
+**Figure 3.** Decode speed against prompt length, Qwen3.8 27B Q4 on mlx-dspark, eight real runs
 and one synthetic.
 {{< /fig >}}
 
@@ -156,13 +156,66 @@ one of them, so verdict agreement says little. By hand:
   a cross-read of the design text against the test list.
 - The only overlap was on items the author's own notes already disclosed. Keyword scoring first suggested 5-7 of 7
   reference items for the small-chunk runs; hand-checking showed those were false matches.
-- The best overlap (3 of 7) came from the dense Qwen3.7 in a one-shot 107k run, so "one shot is worse" is not a
+- The best overlap (3 of 7) came from the Qwen3.8 Q4 (mlx-dspark) build in a one-shot 107k run, so "one shot is worse" is not a
   general result.
 - Small chunks inflate harshness: the prompt asks the model to list what it could not see, and the small-chunk runs
   turn that into findings ("source under test not shown"). That happened to align with the references here and
   would produce false alarms on a clean package; no clean control was run.
 
-On the eight earlier real packages with the dense Qwen3.7, 5 of 8 verdicts matched a reference. All three misses
+
+**Agreement with each reference reviewer.** Rows are the local model's verdict, columns the reference reviewer's. Eight real
+review packages, Qwen3.8 Q4 (mlx-dspark), one run each; the second reference was absent on one package.
+
+| vs Claude (8 packages) | ref accept | ref repair | ref needs-human |
+|---|---|---|---|
+| model **accept** | 0 | **3** | 0 |
+| model **repair** | 0 | 3 | 0 |
+| model **needs-human** | 1 | 1 | 0 |
+
+| vs Codex (7 packages) | ref accept | ref repair | ref needs-human |
+|---|---|---|---|
+| model **accept** | 0 | **3** | 0 |
+| model **repair** | 0 | 2 | 0 |
+| model **needs-human** | 0 | 0 | 2 |
+
+Exact-label agreement is 3 of 8 with Claude and 4 of 7 with Codex. The two references agreed with each other on 5 of 7 packages
+where both reported. Collapsing to "asks for changes" against "accept": the model asked for changes on 5 packages and was
+never contradicted by *both* references on those, but it said `accept` on 3 packages where **both** references said `repair`
+(a false-accept rate of 3 of 8). Every package here needed changes according to at least one reference, so **specificity (how
+often a clean package is accepted) cannot be computed**: there was no clean control.
+
+**On the one shared package** (Claude: `repair`, Codex: `needs-human`), merge-level verdicts of eight variants:
+
+| Variant | Verdict | = Claude | = Codex |
+|---|---|---|---|
+| Qwen3.8 Q4 (mlx-dspark), one shot 107k | needs-human | no | yes |
+| Qwen3.8 oQ4e, 6×30k | repair | yes | no |
+| Ornith oQ4e, 10×19k | needs-human | no | yes |
+| Ornith oQ3e, 10×19k | needs-human | no | yes |
+| Ornith oQ3e, 6×30k | needs-human | no | yes |
+| Ornith oQ3e, 4×50k | needs-human | no | yes |
+| Ornith oQ3e, 2×100k | repair | yes | no |
+| Ornith oQ3e, one shot 132k (padded) | **accept** | no | no |
+
+That is 2 of 8 with Claude and 5 of 8 with Codex, and 7 of 8 not `accept`. As the reviewers split, a verdict other than `accept` is
+bound to match one of them, so this is a weak test of anything beyond "does it refuse to accept".
+
+**Item-level overlap with the reference findings** (hand-checked; Claude had 5 distinct findings, Codex 3, one shared). Partial
+or related matches are shown as ranges.
+
+| Variant | Claude items found | Codex items found | Either reviewer's P2 found |
+|---|---|---|---|
+| Qwen3.8 Q4 (mlx-dspark), one shot 107k | 2 / 5 | 2 / 3 | no |
+| Qwen3.8 oQ4e, 6×30k | 1-2 / 5 | 1 / 3 | no |
+| Ornith oQ4e, 10×19k | 1-2 / 5 | 1 / 3 | no |
+| Ornith oQ3e, 6×30k | 1-2 / 5 | 1 / 3 | no |
+| Ornith oQ3e, 4×50k | 1 / 5 | 1 / 3 | no |
+| Ornith oQ3e, 2×100k | 1 / 5 | 0 / 3 | no |
+| Ornith oQ3e, one shot 132k | 1 / 5 | 1-2 / 3 | no |
+
+The shared finding is the main overlap; no variant found a reference reviewer's "this test is missing" P2.
+
+On the eight earlier real packages with the Qwen3.8 Q4 (mlx-dspark) build, 5 of 8 verdicts matched a reference. All three misses
 were `accept` where both references said `repair`. Every `repair` or `needs-human` it issued had a matching
 reference verdict.
 
@@ -172,7 +225,7 @@ Each model was asked to implement three small existing modules from the real tes
 one sibling for style, never the answer. Output was linted, compiled with the project's real build and run, with
 one repair round that fed back the actual compiler output. Reference implementations passed in the same harness.
 
-**0 of 9 passed** (3 models × 3 tasks; the dense Qwen3.7 build was left out because it is not a popular model to run on this Mac mini, so I did not spend the test on it). The closest: Qwen3.8-27B compiled one task and passed 8 of 10 assertions.
+**0 of 9 passed** (3 models × 3 tasks; the Qwen3.8 Q4 build on mlx-dspark was not run on this task). The closest: Qwen3.8-27B compiled one task and passed 8 of 10 assertions.
 Failures were unbalanced brackets and unresolved symbols. The repair round mostly returned the same code
 (7 of 9 near-identical or identical) even with the error text in the prompt. This was a Lisp-family language
 (ClojureScript), which is unforgiving about brackets, so it may be harder than the average language, and the
@@ -247,7 +300,7 @@ Harness requirements for any of them:
   merge input.
 - Tolerant JSON parse and one retry per chunk; scan for `[Error` inside 200 responses.
 - Closing reminder: no tools, JSON only. Thinking off. Tell the reviewer the phase and what is intentionally a stub.
-- Deadline of at least 1,500 s for a single request above about 80k tokens on the dense Qwen3.7 build (measured: 1,072 s at 132k).
+- Deadline of at least 1,500 s for a single request above about 80k tokens on the Qwen3.8 Q4 (mlx-dspark) build (measured: 1,072 s at 132k).
 - Prevent the merge from dropping a finding raised by two or more chunks. Treat a lone P0 from a local model as
   a claim to check against the source, not as a result.
 - Treat the local verdict as a screening signal. An `accept` from it is no evidence when a stronger reviewer
@@ -304,22 +357,23 @@ extra look, used with a harness that does not trust them for identifiers, severi
 
 ## References and notes
 
-[^naming]: Server labels differ in one place: the dense 27B model served by mlx-dspark is called Qwen3.7 here; its
-    first report's title used a 3.8 label for the same file. Qwen3.8-27B in this post always means the `oQ4e` build
-    served by oMLX.
+[^naming]: Two different Qwen3.8 27B builds appear: a 4-bit build with a DFlash draft model on the mlx-dspark server ("Qwen3.8 Q4
+    (mlx-dspark)"), and the oQ4e multi-token-prediction build on oMLX ("Qwen3.8 oQ4e"). They are different files on different
+    servers and are not interchangeable in the results. Qwen3.7 was never tested; an earlier internal note mislabelled the
+    mlx-dspark build with that name.
 
     Exact model IDs as served by oMLX 0.7.3 (build 3574) when the tests ran: `Qwen3.8-27B-oQ4e-mtp`,
-    `Ornith-1.5-35B-A3B-oQ3e-mtp`, `Ornith-1.5-35B-A3B-oQ4e-mtp`, and `qwen3.27b.q4` (dense Qwen3.7, mlx-dspark server).
+    `Ornith-1.5-35B-A3B-oQ3e-mtp`, `Ornith-1.5-35B-A3B-oQ4e-mtp`, and `qwen3.27b.q4` (Qwen3.8 27B Q4 with a DFlash drafter, mlx-dspark server).
     An earlier, heavier Ornith build with fp16 parts (`…-oQ4e-fp16-mtp`, 23.6 GB) was also tried and rejected for size.
 
 [^src]: Model sources.
     - Qwen3.8-27B oQ4e: [`jundot/Qwen3.8-27B-oQ4e-mtp`](https://huggingface.co/jundot/Qwen3.8-27B-oQ4e-mtp), Hugging Face revision `7dd276b` at 2026-11-05.
     - Ornith 1.5 35B-A3B oQ4e: [`scottlowry/Ornith-1.5-35B-A3B-oQ4e-mtp`](https://huggingface.co/scottlowry/Ornith-1.5-35B-A3B-oQ4e-mtp), revision `1d2d5d4` at 2026-11-05.
-    - Ornith 1.5 35B-A3B oQ3e: source repository not yet recorded (**to fill in before publishing**).
+    - Ornith 1.5 35B-A3B oQ3e: `scottlowry/Ornith-1.5-35B-A3B-oQ3e-mtp`. At the time of writing this repository page was not publicly reachable (it may be private, renamed or gated), so it is named but not linked, and no revision is recorded.
     The revisions are the repositories' *current* heads when this post was written, not hashes captured at test time, so
     a later upload under the same name would not be visible in this record. Model-file hashes were not recorded.
 
-## Appendix A. Per-run table, dense Qwen3.7 27B, real review packages
+## Appendix A. Per-run table, Qwen3.8 27B Q4 on mlx-dspark, real review packages
 
 One run each, temperature 0.2, thinking off. "Match" is against the two frontier reviewers; `(Codex)` means it matched
 only one of them, and ✗ means `accept` where both asked for changes.
@@ -338,6 +392,6 @@ only one of them, and ✗ means `accept` where both asked for changes.
 
 ## Appendix B. What the review comparison counted
 
-Hand-checked reference overlap on the shared package (7 reference items; two frontier reviewers): dense Qwen3.7
-one-shot 107k: 3; Qwen3.8-27B 6×30k: 1-2; Ornith oQ4e 10×19k: 1-2; oQ3e 6×30k: 1-2; oQ3e 4×50k: 1; oQ3e 2×100k: 1;
+Hand-checked reference overlap on the shared package (7 reference items; two frontier reviewers): Qwen3.8 Q4 (mlx-dspark)
+one-shot 107k: 3; Qwen3.8 oQ4e 6×30k: 1-2; Ornith oQ4e 10×19k: 1-2; oQ3e 6×30k: 1-2; oQ3e 4×50k: 1; oQ3e 2×100k: 1;
 oQ3e one-shot 132k: 1-2. Ranges mean the match was partial or related rather than the same finding.
