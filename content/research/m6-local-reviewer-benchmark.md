@@ -14,7 +14,7 @@ draft: true
 > **Ornith 1.5 35B-A3B at the lower-bit `oQ3e` quantization** was the fastest option (a 135k-token package in
 > 4.3-5.3 minutes versus 15.5 for Qwen3.8-27B) and ran from 19k-token chunks up to a single 132k request without a
 > memory abort. **Qwen3.8-27B `oQ4e`** is slower but leaves similar headroom and is the dense, more conventional fallback
-> (this study did not show it merges more reliably). Every build under-called subtle contract gaps that the frontier reviewers found,
+> (this study did not show a clear merge-reliability difference; see §4.6). Every build under-called subtle contract gaps that the frontier reviewers found,
 > and none of the three builds tested passed any of nine implement-from-tests tasks. Local models are usable as a screening vote, not as a gate
 > and not as an implementer. All numbers are single runs; limits are in [section 7](#7-limits).
 
@@ -46,7 +46,10 @@ static memory cap was 29 GB; the dynamic ceiling moved between 24.3 and 26.9 GB 
 | Ornith oQ4e | Ornith 1.5 35B-A3B, mixture of experts | `oQ4e`, multi-token prediction | 22.65 GB | oMLX |
 | Ornith oQ3e | Ornith 1.5 35B-A3B, mixture of experts | `oQ3e`, multi-token prediction | 17.4 GB | oMLX |
 
-The Ornith builds hold all 35B parameters in RAM even though only about 3B are active per token. That is why they
+In the build names, `mtp` marks multi-token prediction (used here for faster decoding) and the `oQ*e` quantizations were
+chosen for better MLX performance. oMLX was version 0.7.3 (build 3574).
+
+Model sources and revisions are in the notes.[^src] The Ornith builds hold all 35B parameters in RAM even though only about 3B are active per token. That is why they
 decode quickly but need much more memory than their speed suggests.[^naming]
 
 {{< fig name="fig-memory" >}}
@@ -169,12 +172,44 @@ Each model was asked to implement three small existing modules from the real tes
 one sibling for style, never the answer. Output was linted, compiled with the project's real build and run, with
 one repair round that fed back the actual compiler output. Reference implementations passed in the same harness.
 
-**0 of 9 passed** (3 models × 3 tasks; the dense Qwen3.7 build was not run on this task). The closest: Qwen3.8-27B compiled one task and passed 8 of 10 assertions.
+**0 of 9 passed** (3 models × 3 tasks; the dense Qwen3.7 build was left out because it is not a popular model to run on this Mac mini, so I did not spend the test on it). The closest: Qwen3.8-27B compiled one task and passed 8 of 10 assertions.
 Failures were unbalanced brackets and unresolved symbols. The repair round mostly returned the same code
 (7 of 9 near-identical or identical) even with the error text in the prompt. This was a Lisp-family language
 (ClojureScript), which is unforgiving about brackets, so it may be harder than the average language, and the
 three tasks are not a sample of coding in general. No frontier baseline was run. Conclusion: *these nine attempts all
 failed*; it is not evidence about other languages, larger repair budgets or other prompts.
+
+### 4.6 Hand-checking the merge-level findings
+
+To test the claim that a higher finding count is not a higher accuracy, I read the merge-level P0-P2 findings of the four chunked
+runs on the shared package against the package text (the test, the code it exercises, and the design excerpt): 30 findings, of
+which I checked 19. The other 11 were not checked and are not counted below.
+
+| Merge (findings checked / P0-P2 total) | False or unsupported | Expected at RED (accurate description of a deliberate stub) | True and already disclosed by the author | New real defect |
+|---|---|---|---|---|
+| Qwen3.8-27B, 6×30k (4 / 5) | 1 | 3 | 0 | 0 |
+| Ornith oQ4e, 10×19k (8 / 14) | 4 | 2 | 2 | 0 |
+| Ornith oQ3e, 10×19k (3 / 7) | 3 | 0 | 0 | 0 |
+| Ornith oQ3e, 4×50k (4 / 4) | 1 | 1 | 2 (one is the planted codeword) | 0 |
+
+What "false or unsupported" looked like:
+
+- A test said to contradict its own docstring (Qwen3.8 and oQ4e): the test was *inverted on purpose* by the design decision it
+  cites, and the docstring says so.
+- A test called a vacuous control (oQ4e, twice): one asserts an exact literal key set and a forbidden-key check; the other
+  restores the console *after* capturing a buffer that already holds the canary.
+- "A try/catch swallows all values including non-Error" (oQ3e 19k, a **P0**): the code catches `js/Error` explicitly, so the
+  premise of the finding is wrong.
+- "Hash mismatch between chunk 9 and the header" (oQ3e 19k, **P0**): the model's own mis-copy of a hash, reported as a defect.
+- "reviewed SHA differs between headers" (oQ3e 19k): the package holds one reviewed SHA and a different *base* SHA; no mismatch.
+- "A test asserts a constant stub equals a real SHA-256" (oQ3e 50k): that is a deliberately failing RED test, and the package
+  states that 10 of its 12 assertions fail by design.
+
+Reading, with small numbers: **none of the 19 checked findings was a new real defect**, in any build. The false rate among the
+checked ones was lowest for Qwen3.8 (1 of 4) and the oQ3e 50k merge (1 of 4), and highest for the oQ3e 19k merge (3 of 3, both of
+its P0s). That supports "the oQ3e 19k merge should not be trusted" and "a lone P0 needs a source check", but it does **not**
+establish a ranking between Qwen3.8 and Ornith: the samples are tiny and the unchecked findings could change any row. It also
+does not measure recall, which the earlier comparison against the two reference reviewers already showed to be low for all of them.
 
 ## 5. Failure modes
 
@@ -273,11 +308,16 @@ extra look, used with a harness that does not trust them for identifiers, severi
     first report's title used a 3.8 label for the same file. Qwen3.8-27B in this post always means the `oQ4e` build
     served by oMLX.
 
-    Exact model IDs as served by the oMLX endpoint when the tests ran (read from its model list): `Qwen3.8-27B-oQ4e-mtp`,
-    `Ornith-1.5-35B-A3B-oQ3e-mtp`, `Ornith-1.5-35B-A3B-oQ4e-mtp`, `qwen3.27b.q4` (dense Qwen3.7, mlx-dspark server). An
-    earlier, heavier Ornith build with fp16 parts (`…-oQ4e-fp16-mtp`, 23.6 GB) was also tried and rejected for size. The
-    oMLX version and the model file hashes were not recorded at the time and the server does not report them; treat
-    "same model name" as "same build family", not as a verified identical file.
+    Exact model IDs as served by oMLX 0.7.3 (build 3574) when the tests ran: `Qwen3.8-27B-oQ4e-mtp`,
+    `Ornith-1.5-35B-A3B-oQ3e-mtp`, `Ornith-1.5-35B-A3B-oQ4e-mtp`, and `qwen3.27b.q4` (dense Qwen3.7, mlx-dspark server).
+    An earlier, heavier Ornith build with fp16 parts (`…-oQ4e-fp16-mtp`, 23.6 GB) was also tried and rejected for size.
+
+[^src]: Model sources.
+    - Qwen3.8-27B oQ4e: [`jundot/Qwen3.8-27B-oQ4e-mtp`](https://huggingface.co/jundot/Qwen3.8-27B-oQ4e-mtp), Hugging Face revision `7dd276b` at 2026-11-05.
+    - Ornith 1.5 35B-A3B oQ4e: [`scottlowry/Ornith-1.5-35B-A3B-oQ4e-mtp`](https://huggingface.co/scottlowry/Ornith-1.5-35B-A3B-oQ4e-mtp), revision `1d2d5d4` at 2026-11-05.
+    - Ornith 1.5 35B-A3B oQ3e: source repository not yet recorded (**to fill in before publishing**).
+    The revisions are the repositories' *current* heads when this post was written, not hashes captured at test time, so
+    a later upload under the same name would not be visible in this record. Model-file hashes were not recorded.
 
 ## Appendix A. Per-run table, dense Qwen3.7 27B, real review packages
 
