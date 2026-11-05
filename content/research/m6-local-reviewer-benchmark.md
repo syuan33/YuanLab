@@ -1,22 +1,23 @@
 ---
 title: "Local Code-Review Models on a 32 GB Mac"
 date: 2026-11-05
-description: "Which local model to load for long-context code review on a 32 GB Apple-silicon Mac as of end of October 2026: Ornith 1.5 35B-A3B (oQ3e, oQ4e) versus Qwen3.8-27B, with method, numbers and limits."
+description: "Which local model to load for long-context code review on a 32 GB Apple-silicon Mac using models downloaded by 31 October 2026: Ornith 1.5 35B-A3B (oQ3e, oQ4e) versus Qwen3.8-27B, with method, numbers and limits."
 tags: ["llm", "mlx", "omlx", "benchmark", "code-review"]
 toc: true
-draft: true
+draft: false
 ---
 
 > **Abstract.** I measured four local model builds as *advisory code reviewers* on a Mac mini with 32 GB of
-> unified memory, serving long review prompts (up to about 135k tokens) through oMLX. The question was practical:
+> unified memory, serving long review prompts (up to about 135k tokens), mostly through oMLX (one build through mlx-dspark). The question was practical:
 > which build should be loaded when a third, cheap, private reviewer is wanted next to two frontier reviewers?
 > On this machine the limiting resource is memory headroom for the KV cache, not raw model quality.
 > **Ornith 1.5 35B-A3B at the lower-bit `oQ3e` quantization** was the fastest option (a 135k-token package in
 > 4.3-5.3 minutes versus 15.5 for Qwen3.8-27B) and ran from 19k-token chunks up to a single 132k request without a
 > memory abort. **Qwen3.8-27B `oQ4e`** is slower but leaves similar headroom and is the dense, more conventional fallback
 > (this study did not show a clear merge-reliability difference; see §4.6). Every build under-called subtle contract gaps that the frontier reviewers found,
-> and none of the three builds tested passed any of nine implement-from-tests tasks. Local models are usable as a screening vote, not as a gate
-> and not as an implementer. All numbers are single runs; limits are in [section 7](#7-limits).
+> and none of the three builds tested passed any of nine implement-from-tests tasks. A short follow-up pilot (§4.7) of the same Qwen3.8 oQ4e build as an early screener
+> found few of the issues the frontier reviewers found and none confirmed as a real blocker, so I do not recommend that use.
+> Local models are usable as a screening vote, not as a gate and not as an implementer. All numbers are single runs; limits are in [section 7](#7-limits).
 
 ## 1. Introduction
 
@@ -62,6 +63,8 @@ KV cache (it ran 19k-token requests but not 30k); Qwen3.8-27B and Ornith oQ3e le
 - **Prompts.** Eight real review packages of 42k-107k tokens (136-401 KB of text) plus one synthetic 132k-token
   package: the largest real package, padded with unrelated design text, with a planted *needle* (a codeword in the
   middle) to test retrieval. The same package was reused for the chunked comparison across models.
+- **Dates.** All four builds were downloaded by 31 October 2026. The mlx-dspark runs were on 31 October, the oMLX runs on
+  1 November, and the screener pilot (§4.7) on 2 November.
 - **Strictly sequential.** One request in flight at any time, enforced with a lock file. A shared box must not be
   asked to do two things at once, and a second client switching models aborts the first one's request.
 - **Settings.** Temperature 0.2, `max_tokens` 4096-8000, thinking off (section 5), a closing reminder appended:
@@ -264,6 +267,48 @@ its P0s). That supports "the oQ3e 19k merge should not be trusted" and "a lone P
 establish a ranking between Qwen3.8 and Ornith: the samples are tiny and the unchecked findings could change any row. It also
 does not measure recall, which the earlier comparison against the two reference reviewers already showed to be low for all of them.
 
+### 4.7 Follow-up: Qwen3.8 oQ4e as an early screener (pilot, 2 November)
+
+The same Qwen3.8 oQ4e build (downloaded by 31 October, tested in early November) was tried as a *pre-screener*: run first, cheaply,
+on a review package before the frontier reviewers, to surface suspicions early. The question was whether its output could shorten
+or replace part of the frontier review. It could not.
+
+**Setup.** 14 packages were eligible (red-phase and green-phase review rounds of six internal work items); 13 completed. Inputs were
+rebuilt from the diff and the full text of changed files only, with the author's notes (including how earlier findings were
+dispositioned) removed, grouped so each source file travels with its tests, in chunks of at most about 30k tokens plus a merge
+request. Temperature 0.2, thinking off, one retry per request, one request at a time, and a memory-ceiling stop condition. Each
+prompt carried a hash the model had to echo; the harness wrote its own metadata separately and never trusted the reply's fields.
+
+| Measure | Result |
+|---|---|
+| Packages completed / failed | 13 / 1 (a chunk returned malformed JSON twice and was not re-run) |
+| Candidate P0-P2 findings raised by the model | 76 |
+| Confirmed as real blockers | **0** |
+| Expected at the red phase (an accurate description of a deliberate stub) | 17 |
+| False positives | 7 |
+| Not judgeable from the material in the chunk | 19 |
+| Non-blocking notes | 9 |
+| True, non-blocking | 2 |
+| True and already known to the author | 1 |
+| Partial overlap with a frontier finding | 2 |
+| Not verified | 19 |
+| Frontier-reviewer P0-P2 findings (the reference) | 64 |
+| Share of the ~58 coverable reference findings the model found | roughly 2-5% |
+| Chunk findings after the merge step | 100 → 90 (3 P0/P1 not matched to any chunk, judged noise) |
+| Identifier copying (hash, commit, id) wrong | 0 of 47 replies |
+| `provider` field correct | 0 of 47 (my prompt told it to give "your own name"; 21 said Claude) |
+| Cost | 64 request attempts (4 retries), 2.1 h, 1.03M prompt tokens, 97k completion tokens |
+
+**Reading.** Almost nothing it flagged was a real blocker, and it found a small slice of what the frontier reviewers found, so it
+cannot replace them or reduce what they must read; any token saving is only an estimate and would have to be weighed against reading its false alarms. **Conclusion: not adopted as a screener.** What does hold: with a hash echo and the harness writing the trusted fields, the model
+copied identifiers correctly in all 47 replies, against the one copy error this same build made in the earlier chunked run (§4.3).
+
+**Limits of the pilot.** 19 candidates were never verified. There was **no clean control** (every package needed changes
+according to a frontier reviewer) so the false-alarm rate on good code is unknown, and **no green-phase code samples** were included
+in the completed set. The token saving is an estimate (about 1.0M formal-review input tokens per reviewer), not a measurement. Verification
+was not fully blind to the reference findings, and some inputs were not blind to earlier rounds. The raw outputs are kept
+privately and are not published here.
+
 ## 5. Failure modes
 
 1. **Thinking mode never finishes.** On a 42k prompt with an 8,192-token budget the model spent the whole budget
@@ -309,6 +354,9 @@ Harness requirements for any of them:
 
 ## 7. Limits
 
+- **No clean control anywhere in this study.** Every package I had needed changes according to at least one frontier
+  reviewer, so I cannot report how often a local build wrongly raises or wrongly accepts on *good* code (specificity, and
+  therefore a full confusion matrix). I did not run one; the false-accept counts in §4.4 are the only error rate available.
 - **Single runs.** One run per configuration at temperature 0.2, so run-to-run variance is unmeasured.
 - **One package for the chunked comparison**, plus one synthetic variant. Verdict match is one data point per
   model.
