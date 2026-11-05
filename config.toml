@@ -13,6 +13,10 @@ titleCaseStyle = "none"
     name = "Toolkit"
     pageRef = "/toolkit"
     weight = 10
+  [[menus.main]]
+    name = "Research"
+    pageRef = "/research"
+    weight = 20
 
 [markup]
   [markup.highlight]

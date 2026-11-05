@@ -1,0 +1,4 @@
+<figure class="figure" id="{{ .Get "name" }}">
+  {{ with resources.Get (printf "research/%s.svg" (.Get "name")) }}{{ .Content | safeHTML }}{{ end }}
+  <figcaption>{{ .Inner | markdownify }}</figcaption>
+</figure>

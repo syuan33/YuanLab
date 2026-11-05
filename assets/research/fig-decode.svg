@@ -1,0 +1,45 @@
+<svg class="fig" viewBox="0 0 690 300" role="img" aria-labelledby="t d" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;max-width:690px">
+<title id="t">Decode speed falls with context length</title><desc id="d">For the dense Qwen3.7 27B model, decode speed falls from 13.6 tokens per second at 45k prompt tokens to 3.4 at 132k.</desc>
+<style>
+.f-t{fill:var(--fg);font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.f-m{fill:var(--muted);font:12px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.f-b{fill:var(--fg);font:600 13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.f-box{fill:var(--code-bg);stroke:var(--border);stroke-width:1.2}
+.f-acc{fill:var(--accent)}
+.f-dim{fill:var(--muted);opacity:.55}
+.f-line{stroke:var(--muted);stroke-width:1.2;fill:none}
+.f-ln{stroke:var(--accent);stroke-width:2.2;fill:none}
+.f-warn{stroke:#c0392b;stroke-width:1.6;stroke-dasharray:5 4;fill:none}
+.f-warnt{fill:#c0392b;font:600 12px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.f-grid{stroke:var(--border);stroke-width:1}
+</style>
+<line class="f-grid" x1="70" y1="250.0" x2="660" y2="250.0"/>
+<text class="f-m" x="62" y="254.0" text-anchor="end">0</text>
+<line class="f-grid" x1="70" y1="193.5" x2="660" y2="193.5"/>
+<text class="f-m" x="62" y="197.5" text-anchor="end">4</text>
+<line class="f-grid" x1="70" y1="137.0" x2="660" y2="137.0"/>
+<text class="f-m" x="62" y="141.0" text-anchor="end">8</text>
+<line class="f-grid" x1="70" y1="80.5" x2="660" y2="80.5"/>
+<text class="f-m" x="62" y="84.5" text-anchor="end">12</text>
+<line class="f-grid" x1="70" y1="24.0" x2="660" y2="24.0"/>
+<text class="f-m" x="62" y="28.0" text-anchor="end">16</text>
+<text class="f-m" x="70.0" y="268" text-anchor="middle">40k</text>
+<text class="f-m" x="188.0" y="268" text-anchor="middle">60k</text>
+<text class="f-m" x="306.0" y="268" text-anchor="middle">80k</text>
+<text class="f-m" x="424.0" y="268" text-anchor="middle">100k</text>
+<text class="f-m" x="542.0" y="268" text-anchor="middle">120k</text>
+<text class="f-m" x="660.0" y="268" text-anchor="middle">140k</text>
+<text class="f-m" x="365.0" y="292" text-anchor="middle">prompt tokens</text>
+<text class="f-m" x="14" y="137.0" text-anchor="middle" transform="rotate(-90 14 137.0)">decode tokens/s</text>
+<path class="f-ln" d="M100.1 57.9 L155.6 55.1 L212.2 94.6 L241.1 110.2 L247.6 113.0 L341.4 155.4 L464.7 176.6 L615.2 202.0"/>
+<circle class="f-acc" cx="100.1" cy="57.9" r="4"/>
+<circle class="f-acc" cx="155.6" cy="55.1" r="4"/>
+<circle class="f-acc" cx="212.2" cy="94.6" r="4"/>
+<circle class="f-acc" cx="241.1" cy="110.2" r="4"/>
+<circle class="f-acc" cx="247.6" cy="113.0" r="4"/>
+<circle class="f-acc" cx="341.4" cy="155.4" r="4"/>
+<circle class="f-acc" cx="464.7" cy="176.6" r="4"/>
+<circle class="f-acc" cx="615.2" cy="202.0" r="4"/>
+<text class="f-t" x="611.2" y="224.0" text-anchor="end">3.4 tok/s at 132k</text>
+<text class="f-t" x="106.1" y="47.9">13.6 at 45k</text>
+</svg>

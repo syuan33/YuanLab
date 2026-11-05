@@ -76,3 +76,7 @@ blockquote p { margin: .3rem 0; }
   body { font-size: 16px; }
   h1 { font-size: 1.6rem; }
 }
+
+.figure { margin: 1.75rem 0; }
+.figure figcaption { color: var(--muted); font-size: .9rem; margin-top: .4rem; }
+.abstract { border-left: 3px solid var(--border); padding: .1rem 1rem; color: var(--fg); }
