@@ -4,4 +4,8 @@
 <h2>{{ .Title }}</h2>
 {{ partial "page-list.html" .Pages }}
 {{ end }}
+{{ with site.GetPage "/research" }}
+<h2>{{ .Title }}</h2>
+{{ partial "page-list.html" .Pages }}
+{{ end }}
 {{ end }}

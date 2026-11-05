@@ -1,0 +1,54 @@
+<svg class="fig" viewBox="0 0 690 285" role="img" aria-labelledby="t d" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;max-width:690px">
+<title id="t">Chunked review pipeline</title><desc id="d">A 135k-token review package is split into overlapping chunks, each reviewed in a separate request, then a merge request deduplicates the findings into one verdict.</desc>
+<style>
+.f-t{fill:var(--fg);font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.f-m{fill:var(--muted);font:12px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.f-b{fill:var(--fg);font:600 13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.f-box{fill:var(--code-bg);stroke:var(--border);stroke-width:1.2}
+.f-acc{fill:var(--accent)}
+.f-dim{fill:var(--muted);opacity:.55}
+.f-line{stroke:var(--muted);stroke-width:1.2;fill:none}
+.f-ln{stroke:var(--accent);stroke-width:2.2;fill:none}
+.f-warn{stroke:#c0392b;stroke-width:1.6;stroke-dasharray:5 4;fill:none}
+.f-warnt{fill:#c0392b;font:600 12px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.f-grid{stroke:var(--border);stroke-width:1}
+</style>
+<rect class="f-box" x="10" y="100" width="118" height="56" rx="8"/>
+<text class="f-b" x="69.0" y="122" text-anchor="middle">Review package</text>
+<text class="f-m" x="69.0" y="140" text-anchor="middle">~135k tokens</text>
+<rect class="f-box" x="190" y="20" width="120" height="44" rx="8"/>
+<text class="f-b" x="250.0" y="47.0" text-anchor="middle">chunk 1</text>
+<path class="f-line" d="M128 128 L190 42"/>
+<path class="f-line" d="M184 38 L190 42 L184 46"/>
+<rect class="f-box" x="190" y="80" width="120" height="44" rx="8"/>
+<text class="f-b" x="250.0" y="107.0" text-anchor="middle">chunk 2</text>
+<path class="f-line" d="M128 128 L190 102"/>
+<path class="f-line" d="M184 98 L190 102 L184 106"/>
+<rect class="f-box" x="190" y="140" width="120" height="44" rx="8"/>
+<text class="f-b" x="250.0" y="167.0" text-anchor="middle">chunk 3</text>
+<path class="f-line" d="M128 128 L190 162"/>
+<path class="f-line" d="M184 158 L190 162 L184 166"/>
+<rect class="f-box" x="190" y="200" width="120" height="44" rx="8"/>
+<text class="f-b" x="250.0" y="227.0" text-anchor="middle">chunk N</text>
+<path class="f-line" d="M128 128 L190 222"/>
+<path class="f-line" d="M184 218 L190 222 L184 226"/>
+<rect class="f-box" x="380" y="100" width="118" height="56" rx="8"/>
+<text class="f-b" x="439.0" y="122" text-anchor="middle">Merge request</text>
+<text class="f-m" x="439.0" y="140" text-anchor="middle">dedupe findings</text>
+<path class="f-line" d="M310 42 L380 128"/>
+<path class="f-line" d="M374 124 L380 128 L374 132"/>
+<path class="f-line" d="M310 102 L380 128"/>
+<path class="f-line" d="M374 124 L380 128 L374 132"/>
+<path class="f-line" d="M310 162 L380 128"/>
+<path class="f-line" d="M374 124 L380 128 L374 132"/>
+<path class="f-line" d="M310 222 L380 128"/>
+<path class="f-line" d="M374 124 L380 128 L374 132"/>
+<rect class="f-box" x="552" y="100" width="120" height="56" rx="8"/>
+<text class="f-b" x="612.0" y="122" text-anchor="middle">Final verdict</text>
+<text class="f-m" x="612.0" y="140" text-anchor="middle">one JSON object</text>
+<path class="f-line" d="M498 128 L552 128"/>
+<path class="f-line" d="M546 124 L552 128 L546 132"/>
+<text class="f-m" x="250" y="268" text-anchor="middle">each: ≤ 20-50k tokens, 3-5k overlap, no tools, JSON only</text>
+<text class="f-m" x="440" y="190" text-anchor="middle">lossy: keeps 1-3 of the</text>
+<text class="f-m" x="440" y="205" text-anchor="middle">chunk-level items</text>
+</svg>

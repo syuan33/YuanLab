@@ -1,0 +1,50 @@
+<svg class="fig" viewBox="0 0 690 320" role="img" aria-labelledby="t d" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;max-width:690px">
+<title id="t">Wall-clock time per configuration</title><desc id="d">Qwen3.8-27B takes about 15.5 minutes; every Ornith oQ3e configuration takes 4.3 to 5.3 minutes.</desc>
+<style>
+.f-t{fill:var(--fg);font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.f-m{fill:var(--muted);font:12px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.f-b{fill:var(--fg);font:600 13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.f-box{fill:var(--code-bg);stroke:var(--border);stroke-width:1.2}
+.f-acc{fill:var(--accent)}
+.f-dim{fill:var(--muted);opacity:.55}
+.f-line{stroke:var(--muted);stroke-width:1.2;fill:none}
+.f-ln{stroke:var(--accent);stroke-width:2.2;fill:none}
+.f-warn{stroke:#c0392b;stroke-width:1.6;stroke-dasharray:5 4;fill:none}
+.f-warnt{fill:#c0392b;font:600 12px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.f-grid{stroke:var(--border);stroke-width:1}
+</style>
+<line class="f-grid" x1="250.0" y1="22" x2="250.0" y2="280"/>
+<text class="f-m" x="250.0" y="296" text-anchor="middle">0</text>
+<line class="f-grid" x1="319.4" y1="22" x2="319.4" y2="280"/>
+<text class="f-m" x="319.4" y="296" text-anchor="middle">3</text>
+<line class="f-grid" x1="388.8" y1="22" x2="388.8" y2="280"/>
+<text class="f-m" x="388.8" y="296" text-anchor="middle">6</text>
+<line class="f-grid" x1="458.1" y1="22" x2="458.1" y2="280"/>
+<text class="f-m" x="458.1" y="296" text-anchor="middle">9</text>
+<line class="f-grid" x1="527.5" y1="22" x2="527.5" y2="280"/>
+<text class="f-m" x="527.5" y="296" text-anchor="middle">12</text>
+<line class="f-grid" x1="596.9" y1="22" x2="596.9" y2="280"/>
+<text class="f-m" x="596.9" y="296" text-anchor="middle">15</text>
+<text class="f-m" x="435.0" y="314" text-anchor="middle">minutes for the whole ~135k-token package (lower is faster)</text>
+<text class="f-t" x="240" y="47" text-anchor="end">Qwen3.8-27B oQ4e, 6×30k</text>
+<rect class="f-dim" x="250" y="34" width="358.4" height="22" rx="3"/>
+<text class="f-t" x="616.4" y="50">15.5 min</text>
+<text class="f-t" x="240" y="81" text-anchor="end">Ornith oQ4e, 10×19k</text>
+<rect class="f-dim" x="250" y="68" width="148.0" height="22" rx="3"/>
+<text class="f-t" x="406.0" y="84">6.4 min</text>
+<text class="f-t" x="240" y="115" text-anchor="end">Ornith oQ3e, 10×19k</text>
+<rect class="f-acc" x="250" y="102" width="122.6" height="22" rx="3"/>
+<text class="f-t" x="380.6" y="118">5.3 min</text>
+<text class="f-t" x="240" y="149" text-anchor="end">Ornith oQ3e, 6×30k</text>
+<rect class="f-acc" x="250" y="136" width="108.7" height="22" rx="3"/>
+<text class="f-t" x="366.7" y="152">4.7 min</text>
+<text class="f-t" x="240" y="183" text-anchor="end">Ornith oQ3e, 4×50k</text>
+<rect class="f-acc" x="250" y="170" width="106.4" height="22" rx="3"/>
+<text class="f-t" x="364.4" y="186">4.6 min</text>
+<text class="f-t" x="240" y="217" text-anchor="end">Ornith oQ3e, 2×100k</text>
+<rect class="f-acc" x="250" y="204" width="99.4" height="22" rx="3"/>
+<text class="f-t" x="357.4" y="220">4.3 min</text>
+<text class="f-t" x="240" y="251" text-anchor="end">Ornith oQ3e, one shot 132k</text>
+<rect class="f-acc" x="250" y="238" width="104.1" height="22" rx="3"/>
+<text class="f-t" x="362.1" y="254">4.5 min</text>
+</svg>
