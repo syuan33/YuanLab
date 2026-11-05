@@ -13,9 +13,9 @@ draft: true
 > On this machine the limiting resource is memory headroom for the KV cache, not raw model quality.
 > **Ornith 1.5 35B-A3B at the lower-bit `oQ3e` quantization** was the fastest option (a 135k-token package in
 > 4.3-5.3 minutes versus 15.5 for Qwen3.8-27B) and ran from 19k-token chunks up to a single 132k request without a
-> memory abort. **Qwen3.8-27B `oQ4e`** is slower but leaves similar headroom and is the more conventional choice
-> when merge reliability matters. Every build under-called subtle contract gaps that the frontier reviewers found,
-> and none could implement code from tests (0 of 9). Local models are usable as a screening vote, not as a gate
+> memory abort. **Qwen3.8-27B `oQ4e`** is slower but leaves similar headroom and is the dense, more conventional fallback
+> (this study did not show it merges more reliably). Every build under-called subtle contract gaps that the frontier reviewers found,
+> and none of the three builds tested passed any of nine implement-from-tests tasks. Local models are usable as a screening vote, not as a gate
 > and not as an implementer. All numbers are single runs; limits are in [section 7](#7-limits).
 
 ## 1. Introduction
@@ -50,8 +50,8 @@ The Ornith builds hold all 35B parameters in RAM even though only about 3B are a
 decode quickly but need much more memory than their speed suggests.[^naming]
 
 {{< fig name="fig-memory" >}}
-**Figure 1.** Resident model memory against the oMLX guard. Ornith oQ4e sits at the guard and leaves no room for
-KV cache; Qwen3.8-27B and Ornith oQ3e leave about 8 GB.
+**Figure 1.** Resident model memory against the oMLX guard. Ornith oQ4e sits at the guard and leaves little headroom for
+KV cache (it ran 19k-token requests but not 30k); Qwen3.8-27B and Ornith oQ3e leave about 8 GB.
 {{< /fig >}}
 
 ## 3. Method
@@ -70,8 +70,8 @@ KV cache; Qwen3.8-27B and Ornith oQ3e leave about 8 GB.
   by hand against the two reference reviewers' findings; verdict agreement alone is a weak bar (section 4.4).
 
 {{< fig name="fig-pipeline" >}}
-**Figure 2.** Chunked review. The merge step is lossy: across variants it kept one
-to three of the items found in the individual chunks.
+**Figure 2.** Chunked review. In the one like-for-like pair (§4.3) the merge turned 47 chunk-level findings into 16 (oQ4e) and 37 into 10 (oQ3e). How many of the
+reduction was legitimate de-duplication and how many were dropped findings was not counted item by item.
 {{< /fig >}}
 
 ## 4. Results
@@ -101,8 +101,10 @@ Ornith oQ3e at every chunk size tried, plus one shot.
 The deciding factor was memory. oMLX can admit a request and then abort it mid-prefill when process memory crosses
 a hard watermark below the dynamic ceiling: Ornith oQ4e was aborted at 30k tokens (23.5 GB used against a 23.2 GB
 watermark) and ran cleanly at 19k. The lighter oQ3e build ran 30k, 50k, 100k and 132k requests with resident memory
-flat at 17.4 GB. A one-shot 135k request on Qwen3.8-27B was estimated at 25.9 GB peak against a 22.7 GB limit, so
-its practical single-request ceiling is about 80k tokens.
+flat at 17.4 GB. For Qwen3.8-27B the largest *measured* single request was ~42k tokens (one run). A 135k one-shot was *estimated* at
+25.9 GB peak (17.6 GB weights + 8.3 GB KV/attention, extrapolated from the server's memory estimate) against a 22.7 GB
+limit and was not attempted; a ~80k-token ceiling is that estimate scaled down, not a measurement. A 70k request was
+cut short when another client swapped the model, so the range between 42k and 80k is untested.
 
 ### 4.2 Chunk size (Ornith oQ3e, same 135k package)
 
@@ -131,10 +133,14 @@ judgement softens toward the far end of it. Both effects are single samples.
 | Header-field copy errors | 0 of 10 | 1 of 11 |
 | Shared item raised by both references | kept in merge | **dropped by merge** |
 
-The faster, smaller build also made a telling mistake: it copied a 64-character hash with one wrong digit, and the
+The finding counts above are raw model output; I did not check them item by item, so a higher count or a smaller
+count here does **not** show that either quantization reviews better. The only quality-relevant observations are the
+dropped shared item and the two merge-level P0s, which were not confirmed as real defects.
+
+The smaller build also made one visible mistake: it copied a 64-character hash with one wrong digit, and the
 merge step then reported that mismatch as a P0 defect in the input. The same kind of error appeared once in an
-Ornith oQ3e 30k run and once in Qwen3.8 (a commit hash), and never in the oQ4e build. Three cases are not a rate,
-but they match the idea that lower-bit quantization hurts exact long-string transcription. **Never trust the
+Ornith oQ3e 30k run and once in Qwen3.8 (a commit hash), and never in the oQ4e build. Three cases are not a rate. One *hypothesis* is that lower-bit quantization hurts exact long-string transcription; this
+study did not test it (it would need many replicates per build). **Never trust the
 model to echo identifiers; write them from the harness.**
 
 ### 4.4 Review quality against the two reference reviewers
@@ -163,10 +169,12 @@ Each model was asked to implement three small existing modules from the real tes
 one sibling for style, never the answer. Output was linted, compiled with the project's real build and run, with
 one repair round that fed back the actual compiler output. Reference implementations passed in the same harness.
 
-**0 of 9 passed** (3 models × 3 tasks). The closest: Qwen3.8-27B compiled one task and passed 8 of 10 assertions.
+**0 of 9 passed** (3 models × 3 tasks; the dense Qwen3.7 build was not run on this task). The closest: Qwen3.8-27B compiled one task and passed 8 of 10 assertions.
 Failures were unbalanced brackets and unresolved symbols. The repair round mostly returned the same code
-(7 of 9 near-identical or identical) even with the error text in the prompt. This was a Lisp-family language,
-which is unforgiving about brackets, so it may be harder than the average language; no frontier baseline was run.
+(7 of 9 near-identical or identical) even with the error text in the prompt. This was a Lisp-family language
+(ClojureScript), which is unforgiving about brackets, so it may be harder than the average language, and the
+three tasks are not a sample of coding in general. No frontier baseline was run. Conclusion: *these nine attempts all
+failed*; it is not evidence about other languages, larger repair budgets or other prompts.
 
 ## 5. Failure modes
 
@@ -194,9 +202,9 @@ which is unforgiving about brackets, so it may be harder than the average langua
 | Use | Pick | Setup |
 |---|---|---|
 | Advisory reviewer, speed matters | **Ornith 1.5 35B-A3B `oQ3e`** | 50k-token chunks, 5k overlap, merge; one shot only if you can afford its softer verdict |
-| Advisory reviewer, merge reliability matters | **Qwen3.8-27B `oQ4e`** | 25-30k chunks with 5k overlap plus merge, or one shot up to ~40-70k; slower (~15 min per 135k) |
+| Advisory reviewer, dense-model fallback | **Qwen3.8-27B `oQ4e`** | 25-30k chunks with 5k overlap plus merge (measured); one shot only up to the ~42k actually run (larger is an estimate); slower (~15 min per 135k). A fallback, not shown to be better at merging |
 | Short context, throughput first | Ornith `oQ4e` | at most ~19k tokens per request on a 32 GB machine |
-| Implementer in a test-first loop | none of these | 0 of 9 here |
+| Implementer in a test-first loop | none tested | 0 of 9 passed in this study |
 
 Harness requirements for any of them:
 
@@ -204,7 +212,7 @@ Harness requirements for any of them:
   merge input.
 - Tolerant JSON parse and one retry per chunk; scan for `[Error` inside 200 responses.
 - Closing reminder: no tools, JSON only. Thinking off. Tell the reviewer the phase and what is intentionally a stub.
-- Deadline of at least 1,500 s for a single request above about 80k tokens on the dense model.
+- Deadline of at least 1,500 s for a single request above about 80k tokens on the dense Qwen3.7 build (measured: 1,072 s at 132k).
 - Prevent the merge from dropping a finding raised by two or more chunks. Treat a lone P0 from a local model as
   a claim to check against the source, not as a result.
 - Treat the local verdict as a screening signal. An `accept` from it is no evidence when a stronger reviewer
@@ -221,6 +229,8 @@ Harness requirements for any of them:
 - Verdicts are compared with two frontier reviewers' outputs, not with ground-truth defects.
 - Quantization effect is confounded with chunk size for `oQ4e` (it cannot run larger chunks). The like-for-like
   19k comparison isolates it, but with one run each.
+- The recommendation order between the two models rests on speed, memory and request-size evidence. There is no
+  same-condition merge-accuracy comparison, and the review-quality evidence is one package.
 - Not tested: thinking mode on the new builds; short-prompt orchestration workloads; 200k contexts; the effect of
   draft-model and multi-token-prediction settings; any frontier baseline for the coding task; lower-bit quality
   loss on a ground-truth set.
@@ -252,9 +262,9 @@ and keep the raw output of every request, including errors.
 ## Conclusion
 
 For a 32 GB Apple-silicon Mac in late October 2026, load **Ornith 1.5 35B-A3B at `oQ3e`** when you want a fast
-advisory pass over long review packages, and **Qwen3.8-27B at `oQ4e`** when you want the slower, more
-conventional model with the cleaner merge. Neither replaces a frontier reviewer: all builds missed what the
-frontier reviewers' subtle findings caught, and none can write code from tests. Their value is a private, cheap,
+advisory pass over long review packages, and **Qwen3.8-27B at `oQ4e`** when you want a slower dense
+model as the fallback (it was not shown to merge more reliably than Ornith). Neither replaces a frontier reviewer: all builds missed what the
+frontier reviewers' subtle findings caught, and none of the three builds tested passed any of the nine implement-from-tests tasks. Their value is a private, cheap,
 extra look, used with a harness that does not trust them for identifiers, severities or verdict authority.
 
 ## References and notes
@@ -262,3 +272,32 @@ extra look, used with a harness that does not trust them for identifiers, severi
 [^naming]: Server labels differ in one place: the dense 27B model served by mlx-dspark is called Qwen3.7 here; its
     first report's title used a 3.8 label for the same file. Qwen3.8-27B in this post always means the `oQ4e` build
     served by oMLX.
+
+    Exact model IDs as served by the oMLX endpoint when the tests ran (read from its model list): `Qwen3.8-27B-oQ4e-mtp`,
+    `Ornith-1.5-35B-A3B-oQ3e-mtp`, `Ornith-1.5-35B-A3B-oQ4e-mtp`, `qwen3.27b.q4` (dense Qwen3.7, mlx-dspark server). An
+    earlier, heavier Ornith build with fp16 parts (`…-oQ4e-fp16-mtp`, 23.6 GB) was also tried and rejected for size. The
+    oMLX version and the model file hashes were not recorded at the time and the server does not report them; treat
+    "same model name" as "same build family", not as a verified identical file.
+
+## Appendix A. Per-run table, dense Qwen3.7 27B, real review packages
+
+One run each, temperature 0.2, thinking off. "Match" is against the two frontier reviewers; `(Codex)` means it matched
+only one of them, and ✗ means `accept` where both asked for changes.
+
+| Run | Prompt tokens | Prefill s | Prefill tok/s | Decode tok/s | Total s | Verdict | Match |
+|---|---|---|---|---|---|---|---|
+| P1 | 41.9k | 15 (cache hit) | n/a | 13.2 | 62 | accept | ✗ |
+| P2 | 45.1k | 193 | 234 | 13.6 | 294 | repair | ✓ |
+| P3 | 54.5k | 232 | 235 | 13.8 | 442 | repair | ✓ |
+| P4 | 64.1k | 326 | 197 | 11.0 | 400 | repair | ✓ (one reference absent) |
+| P5 | 69.0k | 320 | 215 | 9.9 | 410 | needs-human | ✓ (Codex) |
+| P6 | 70.1k | 317 | 221 | 9.7 | 501 | accept | ✗ |
+| P7 | 86.0k | 473 | 182 | 6.7 | 581 | accept | ✗ |
+| P8 | 106.9k | 645 | 166 | 5.2 | 877 | needs-human | ✓ (Codex) |
+| S1 (synthetic) | 132.4k | 844 | 157 | 3.4 | 1,072 | repair | not scored |
+
+## Appendix B. What the review comparison counted
+
+Hand-checked reference overlap on the shared package (7 reference items; two frontier reviewers): dense Qwen3.7
+one-shot 107k: 3; Qwen3.8-27B 6×30k: 1-2; Ornith oQ4e 10×19k: 1-2; oQ3e 6×30k: 1-2; oQ3e 4×50k: 1; oQ3e 2×100k: 1;
+oQ3e one-shot 132k: 1-2. Ranges mean the match was partial or related rather than the same finding.
